@@ -49,9 +49,18 @@ jobs:
           test -n "$VERIFY_TOKEN" || { cat /tmp/register.json; docker exec nolcore-postfix find /home/ci/Maildir /var/mail -maxdepth 2 -type f -print; exit 1; }
           test -n "$VERIFY_TOKEN"
           curl -fsS "http://127.0.0.1:8080/v1/user/verify?token=$VERIFY_TOKEN" | jq -e '.verified == true'
+          docker exec nolcore-postfix sh -c 'rm -f /home/ci/Maildir/new/* /home/ci/Maildir/cur/* /var/mail/ci/* 2>/dev/null || true'
+          curl -fsS -X POST http://127.0.0.1:8080/v1/user/resetpassword \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.test"}' | jq -e '.accepted == true'
+          for i in $(seq 1 20); do RESET_TOKEN=$(docker exec nolcore-postfix sh -c "grep -Rho 'token=[0-9a-f]*' /home/ci/Maildir/new /home/ci/Maildir/cur /var/mail/ci 2>/dev/null | head -1 | cut -d= -f2") && test -n "$RESET_TOKEN" && break || sleep 1; done
+          test -n "$RESET_TOKEN"
+          curl -fsS -X POST http://127.0.0.1:8080/v1/user/resetpassword \
+            -H 'Content-Type: application/json' \
+            -d "{\"token\":\"$RESET_TOKEN\",\"password\":\"ci-password-321\"}" | jq -e '.updated == true'
           curl -fsS -X POST http://127.0.0.1:8080/v1/user/login \
             -H 'Content-Type: application/json' \
-            -c /tmp/cookies.txt -d '{"email":"ci@example.test","password":"ci-password-123"}' > /tmp/login.json
+            -c /tmp/cookies.txt -d '{"email":"ci@example.test","password":"ci-password-321"}' > /tmp/login.json
           TOKEN=$(jq -r .token /tmp/login.json)
           test "$TOKEN" != "null" && test -n "$TOKEN"
           curl -fsS http://127.0.0.1:8080/v1/user/me -H "Authorization: Bearer $TOKEN" | jq -e '.email == "ci@example.test"'

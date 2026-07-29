@@ -449,8 +449,56 @@ fn api_ia_modeles(req: Requete, _params: Map<Text>) -> WebResultat {
 }
 
 fn api_user_reset(req: Requete, _params: Map<Text>) -> WebResultat {
-    if not has(utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
-    return api_user_password(req, "reset")
+    // Phase 2 : le lien signé et le nouveau mot de passe. Ce parcours ne
+    // dépend d'aucune session existante et révoque tous les appareils.
+    let token = champ_entree(req,"token")
+    let nouveau = champ_entree(req,"password")
+    if has(token) or has(nouveau) {
+        if not has(token) or not has(nouveau) or len(unwrap_or(nouveau,"")) < 8 { return erreur_json(422,"Unprocessable Content","token et password (8 caractères minimum) sont obligatoires.",req) }
+        let hash_token = hmac_sha256_hex(bytes_from_text(unwrap_or(env("NOLIAE_SESSION_SECRET"),"")),bytes_from_text(unwrap_or(token,"")))
+        let hash_password = mot_de_passe_hache(bytes_from_text(unwrap_or(nouveau,"")))
+        if not has(hash_password) { return erreur_json(500,"Internal Server Error","Hachage indisponible.",req) }
+        let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+        let db_conn = unwrap_or(conn,ptr_null())
+        let changed = pg_requete_params(db_conn,"UPDATE users SET password_hash=$1 WHERE id=(SELECT user_id FROM password_reset_tokens WHERE token_hash=$2 AND used_at IS NULL AND expires_at>now()) RETURNING id",[unwrap_or(hash_password,""),hash_token])
+        if not has(changed) or pg_lignes(unwrap_or(changed,ptr_null())) != 1 { if has(changed) { pg_liberer(unwrap_or(changed,ptr_null())) }; pg_fermer(db_conn); return erreur_json(400,"Bad Request","Token invalide ou expiré.",req) }
+        let user_id = unwrap_or(pg_valeur(unwrap_or(changed,ptr_null()),0,0),"")
+        pg_liberer(unwrap_or(changed,ptr_null()))
+        let used = pg_requete_params(db_conn,"UPDATE password_reset_tokens SET used_at=now() WHERE token_hash=$1",[hash_token]); if has(used) { pg_liberer(unwrap_or(used,ptr_null())) }
+        let revoked = pg_requete_params(db_conn,"UPDATE user_sessions SET revoked=true WHERE user_id=$1",[user_id]); if has(revoked) { pg_liberer(unwrap_or(revoked,ptr_null())) }
+        pg_fermer(db_conn)
+        return WebResultat.WebOk(reponse_json("{\"updated\":true}"))
+    }
+    // Phase 1 : toujours la même réponse afin de ne pas révéler les e-mails
+    // enregistrés. Le message est envoyé uniquement si le compte existe.
+    let email = champ_entree(req,"email")
+    if not has(email) { return erreur_json(422,"Unprocessable Content","email obligatoire.",req) }
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let db_conn = unwrap_or(conn,ptr_null())
+    let account = pg_requete_params(db_conn,"SELECT id FROM users WHERE email=$1",[unwrap_or(email,"")])
+    if has(account) and pg_lignes(unwrap_or(account,ptr_null())) == 1 {
+        let user_id = unwrap_or(pg_valeur(unwrap_or(account,ptr_null()),0,0),"")
+        let raw_token = random_hex(32)
+        if has(raw_token) {
+            let token_hash = hmac_sha256_hex(bytes_from_text(unwrap_or(env("NOLIAE_SESSION_SECRET"),"")),bytes_from_text(unwrap_or(raw_token,"")))
+            let old = pg_requete_params(db_conn,"UPDATE password_reset_tokens SET used_at=now() WHERE user_id=$1 AND used_at IS NULL",[user_id]); if has(old) { pg_liberer(unwrap_or(old,ptr_null())) }
+            let saved = pg_requete_params(db_conn,"INSERT INTO password_reset_tokens(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '30 minutes')",[token_hash,user_id]); if has(saved) { pg_liberer(unwrap_or(saved,ptr_null())) }
+            let smtp_id = unwrap_or(env("NOLCORE_RESET_SMTP_ID"),unwrap_or(env("NOLCORE_VERIFICATION_SMTP_ID"),""))
+            if smtp_id != "" {
+                let profile = pg_requete_params(db_conn,"SELECT host,port,username,secret_env FROM smtp_profiles WHERE id=$1 AND enabled=true",[smtp_id])
+                if has(profile) and pg_lignes(unwrap_or(profile,ptr_null())) == 1 {
+                    let p = unwrap_or(profile,ptr_null()); let host=unwrap_or(pg_valeur(p,0,0),""); let port=unwrap_or(parse_int(unwrap_or(pg_valeur(p,0,1),"465")),465); let username=unwrap_or(pg_valeur(p,0,2),""); let password=unwrap_or(env(unwrap_or(pg_valeur(p,0,3),"")),"")
+                    let from = unwrap_or(env("NOLCORE_RESET_FROM"),unwrap_or(env("NOLCORE_VERIFICATION_FROM"),username))
+                    let url = unwrap_or(env("NOLCORE_RESET_URL"),unwrap_or(env("NOLCORE_PUBLIC_URL"),"http://localhost:8080") + "/reset") + "?token=" + unwrap_or(raw_token,"")
+                    let _sent = smtp_envoyer(host,port,username,password,from,unwrap_or(email,""),"Réinitialisez votre mot de passe","Utilisez ce lien valable 30 minutes : " + url)
+                    pg_liberer(p)
+                } else if has(profile) { pg_liberer(unwrap_or(profile,ptr_null())) }
+            }
+        }
+    }
+    if has(account) { pg_liberer(unwrap_or(account,ptr_null())) }
+    pg_fermer(db_conn)
+    return WebResultat.WebOk(reponse_json("{\"accepted\":true}"))
 }
 
 fn api_user_password(req: Requete, _mode: Text) -> WebResultat {
@@ -464,6 +512,8 @@ fn api_user_password(req: Requete, _mode: Text) -> WebResultat {
     if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
     let res = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE users SET password_hash=$1 WHERE id=$2", [unwrap_or(hash,""),unwrap_or(id,"")])
     if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }
+    let revoked = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE user_sessions SET revoked=true WHERE user_id=$1", [unwrap_or(id,"")])
+    if has(revoked) { pg_liberer(unwrap_or(revoked,ptr_null())) }
     pg_fermer(unwrap_or(conn,ptr_null()))
     return WebResultat.WebOk(reponse_json("{\"updated\":true}"))
 }
