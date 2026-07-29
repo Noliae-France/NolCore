@@ -43,7 +43,9 @@ Noliae plutôt que de dépendre d’une boîte noire.
 ```text
 NolCore
 ├── main.nol                 # routeur + boucle HTTP
-├── *.nhtml                  # Exemples indicatifs, hors du binaire API
+├── examples/mvc/            # Exemples indicatifs de pages, hors du core
+│   ├── *.nhtml              # Gabarits accueil, login, inscription, recherche
+│   └── static/              # CSS de démonstration
 ├── schema.sql               # PostgreSQL et migrations initiales
 ├── crawler.nol              # HTTP + politique robots.txt
 ├── vendor/nolc/lib/         # stdlib Nolc compatible avec le binaire public
@@ -89,8 +91,8 @@ docker compose up --build
 ```
 
 Le conteneur expose uniquement l’API HTTP sur `http://localhost:8080`.
-Les fichiers `.nhtml` présents dans le dépôt sont des exemples de présentation
-et ne sont ni compilés ni servis par le core.
+Les exemples `.nhtml` sont regroupés dans [`examples/mvc`](examples/mvc) : ils
+ne sont ni compilés ni servis par le core.
 
 Les valeurs par défaut de Compose sont destinées au développement local. En
 production, fournir les secrets par l’environnement ou le gestionnaire de

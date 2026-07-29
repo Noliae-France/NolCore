@@ -1,6 +1,6 @@
 # Contribuer à NolCore
 
-NolCore est développé en **Nolc natif**. Les fonctionnalités backend ne doivent pas introduire Node.js. Le core est API-only ; les fichiers `.nhtml` sont des exemples indicatifs et ne doivent pas être utilisés par le runtime.
+NolCore est développé en **Nolc natif**. Les fonctionnalités backend ne doivent pas introduire Node.js. Le core est API-only ; les fichiers de `examples/mvc/` sont des exemples indicatifs et ne doivent pas être utilisés par le runtime.
 
 ## Vérifications
 
