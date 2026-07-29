@@ -24,6 +24,8 @@ jobs:
           docker run -d --rm --name nolcore-postfix --network nolcore-ci \
             -v /tmp/nolcore-smtp-certs:/certs nolcore-postfix:ci
           for i in $(seq 1 30); do test -f /tmp/nolcore-smtp-certs/ca.crt && break || sleep 1; done
+          sleep 5
+          docker exec nolcore-postfix postfix status
           for i in $(seq 1 30); do docker exec nolcore-db pg_isready -U nolcore -d nolcore && break || sleep 1; done
           docker exec nolcore-db psql -U nolcore -d nolcore -c "INSERT INTO smtp_profiles(id,host,port,username,secret_env) VALUES('ci-verify','smtp-test',465,'','CI_SMTP_PASSWORD')"
           docker run -d --rm --name nolcore-smoke --network nolcore-ci -p 8080:8080 \
