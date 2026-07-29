@@ -2,6 +2,9 @@
 set -eu
 
 mkdir -p /certs
+useradd -m -s /usr/sbin/nologin ci || true
+mkdir -p /home/ci/Maildir/{cur,new,tmp}
+chown -R ci:ci /home/ci/Maildir
 if [ ! -f /certs/ca.crt ]; then
   openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
     -subj '/CN=NolCore CI CA' -keyout /certs/ca.key -out /certs/ca.crt
@@ -28,6 +31,14 @@ postconf -P 'smtps/inet/smtpd_tls_security_level=encrypt'
 postconf -M 'submission/inet=587 inet n - y - - smtpd'
 postconf -P 'submission/inet/smtpd_tls_security_level=encrypt'
 postconf -P 'submission/inet/smtpd_tls_auth_only=no'
+
+printf '%s\n' \
+  'protocols = imap' \
+  'mail_location = maildir:~/Maildir' \
+  'ssl = no' \
+  'disable_plaintext_auth = no' \
+  > /etc/dovecot/dovecot.conf
+dovecot
 
 postfix start
 trap 'postfix stop; exit 0' TERM INT

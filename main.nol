@@ -85,9 +85,45 @@ fn api_register(req: Requete, _params: Map<Text>) -> WebResultat {
     if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(409, "Conflict", "Email déjà utilisé.", req) }
     let sortie = unwrap_or(res, ptr_null())
     let id = unwrap_or(pg_valeur(sortie, 0, 0), "")
+    let token = random_hex(32)
+    if not has(token) { pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Token de vérification indisponible.",req) }
+    let token_hash = hmac_sha256_hex(bytes_from_text(unwrap_or(env("NOLIAE_SESSION_SECRET"),"")), bytes_from_text(unwrap_or(token,"")))
+    let saved_token = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO email_verification_tokens(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '24 hours')", [token_hash,id])
+    if has(saved_token) { pg_liberer(unwrap_or(saved_token,ptr_null())) }
+    let smtp_id = unwrap_or(env("NOLCORE_VERIFICATION_SMTP_ID"),"")
+    if smtp_id != "" {
+        let profile = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT host,port,username,secret_env FROM smtp_profiles WHERE id=$1 AND enabled=true", [smtp_id])
+        if not has(profile) or pg_lignes(unwrap_or(profile,ptr_null())) != 1 { if has(profile) { pg_liberer(unwrap_or(profile,ptr_null())) }; pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(503,"Service Unavailable","SMTP de vérification indisponible.",req) }
+        let p = unwrap_or(profile,ptr_null())
+        let host = unwrap_or(pg_valeur(p,0,0),"")
+        let port = unwrap_or(parse_int(unwrap_or(pg_valeur(p,0,1),"465")),465)
+        let username = unwrap_or(pg_valeur(p,0,2),"")
+        let password = unwrap_or(env(unwrap_or(pg_valeur(p,0,3),"")),"")
+        let from = unwrap_or(env("NOLCORE_VERIFICATION_FROM"),username)
+        let url = unwrap_or(env("NOLCORE_PUBLIC_URL"),"http://localhost:8080") + "/v1/user/verify?token=" + unwrap_or(token,"")
+        let delivered = smtp_envoyer(host,port,username,password,from,unwrap_or(email,""),"Vérifiez votre compte Noliae","Cliquez ici pour vérifier votre compte : " + url)
+        pg_liberer(p)
+        if not delivered { pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(502,"Bad Gateway","Envoi du mail de vérification impossible.",req) }
+    }
     let payload = "{\"id\":" + json_texte(id) + ",\"email\":" + json_texte(unwrap_or(email, "")) + ",\"name\":" + json_texte(unwrap_or(nom, "")) + "}"
     pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
     return WebResultat.WebOk(reponse_json(payload))
+}
+
+fn api_verify_email(req: Requete, _params: Map<Text>) -> WebResultat {
+    var token = champ_entree(req,"token")
+    if not has(token) { let query = requete_query(req,"token"); if has(query) { token = query } }
+    if not has(token) { return erreur_json(422,"Unprocessable Content","token obligatoire.",req) }
+    let hash = hmac_sha256_hex(bytes_from_text(unwrap_or(env("NOLIAE_SESSION_SECRET"),"")), bytes_from_text(unwrap_or(token,"")))
+    let conn = db()
+    if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE users SET email_verified=true WHERE id=(SELECT user_id FROM email_verification_tokens WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now()) RETURNING id", [hash])
+    if has(res) and pg_lignes(unwrap_or(res,ptr_null())) == 1 {
+        let done = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE email_verification_tokens SET used_at=now() WHERE token_hash=$1", [hash])
+        if has(done) { pg_liberer(unwrap_or(done,ptr_null())) }
+        pg_liberer(unwrap_or(res,ptr_null())); pg_fermer(unwrap_or(conn,ptr_null())); return WebResultat.WebOk(reponse_json("{\"verified\":true}"))
+    }
+    if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }; pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(400,"Bad Request","Token invalide ou expiré.",req)
 }
 
 fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
@@ -134,13 +170,14 @@ fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
     if not has(email) or not has(mot) { return erreur_json(422, "Unprocessable Content", "email et password sont obligatoires.", req) }
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
-    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,email,display_name,password_hash,role FROM users WHERE email=$1", [unwrap_or(email, "")])
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,email,display_name,password_hash,role,email_verified FROM users WHERE email=$1", [unwrap_or(email, "")])
     if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Identifiants invalides.", req) }
     let sortie = unwrap_or(res, ptr_null())
     if pg_lignes(sortie) != 1 { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Identifiants invalides.", req) }
     let hash = unwrap_or(pg_valeur(sortie, 0, 3), "")
     let valide = mot_de_passe_verifie(hash, bytes_from_text(unwrap_or(mot, "")))
     if not valide { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Identifiants invalides.", req) }
+    if unwrap_or(pg_valeur(sortie,0,5),"false") != "true" { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(403,"Forbidden","Adresse e-mail non vérifiée.",req) }
     let id = unwrap_or(pg_valeur(sortie, 0, 0), "")
     let token = session_signe(unwrap_or(env("NOLIAE_SESSION_SECRET"), ""), id, 86400, maintenant_epoch())
     let cookie = cookie_session(unwrap_or(env("NOLIAE_SESSION_SECRET"), ""), unwrap_or(email,""), ip_requete(req))
@@ -523,6 +560,7 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "POST", "/v1/auth/login", api_login)
     route_type(methodes, patrons, handlers, "POST", "/v1/user/register", api_register)
     route_type(methodes, patrons, handlers, "POST", "/v1/user/login", api_login)
+    route_type(methodes, patrons, handlers, "GET", "/v1/user/verify", api_verify_email)
     route_type(methodes, patrons, handlers, "GET", "/v1/user/me", api_me)
     route_type(methodes, patrons, handlers, "POST", "/v1/user/resetpassword", api_user_reset)
     route_type(methodes, patrons, handlers, "POST", "/v1/user/me/changepassword", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_user_password(r, "change") })
