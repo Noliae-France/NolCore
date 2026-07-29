@@ -454,6 +454,11 @@ fn api_ia_modele(req: Requete, params: Map<Text>) -> WebResultat {
 // proposés. Aucun token ni détail sensible ne quitte le Core.
 fn api_ia_modeles(req: Requete, _params: Map<Text>) -> WebResultat {
     if not has(utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let service_url = unwrap_or(env("NOLCORE_IA_URL"),"")
+    if service_url != "" {
+        let live = http_get(service_url + "/v1/ia/models")
+        if has(live) and unwrap_or(live,ReponseHttp {statut:0,entetes:"",corps:""}).statut < 300 { return WebResultat.WebOk(reponse_json(unwrap_or(live,ReponseHttp {statut:0,entetes:"",corps:"[]"}).corps)) }
+    }
     var items = ""
     var sep = ""
     if unwrap_or(env("NOLCORE_CHATGPT_TOKEN"),"") != "" { items += sep + "{\"provider\":\"chatgpt\",\"model\":\"gpt-4o-mini\",\"label\":\"ChatGPT\"}"; sep = "," }
