@@ -25,12 +25,16 @@ postconf -e 'smtpd_tls_key_file = /certs/server.key'
 postconf -e 'smtpd_tls_security_level = may'
 postconf -e 'smtpd_tls_auth_only = yes'
 postconf -e 'smtpd_recipient_restrictions = permit_mynetworks, reject_unauth_destination'
-postconf -M 'smtps/inet=465 inet n - y - - smtpd'
-postconf -P 'smtps/inet/smtpd_tls_wrappermode=yes'
-postconf -P 'smtps/inet/smtpd_tls_security_level=encrypt'
-postconf -M 'submission/inet=587 inet n - y - - smtpd'
-postconf -P 'submission/inet/smtpd_tls_security_level=encrypt'
-postconf -P 'submission/inet/smtpd_tls_auth_only=no'
+cat >> /etc/postfix/master.cf <<'EOF'
+
+smtps     inet  n       -       y       -       -       smtpd
+  -o smtpd_tls_wrappermode=yes
+  -o smtpd_tls_security_level=encrypt
+  -o smtpd_tls_auth_only=no
+submission inet n       -       y       -       -       smtpd
+  -o smtpd_tls_security_level=encrypt
+  -o smtpd_tls_auth_only=no
+EOF
 
 printf '%s\n' \
   'protocols = imap' \
