@@ -306,7 +306,9 @@ fn api_user_field(req: Requete, champ: Text) -> WebResultat {
 fn api_search_text(req: Requete, params: Map<Text>) -> WebResultat {
     let q = parametre(params, "keyword")
     if q == "" { return erreur_json(422,"Unprocessable Content","keyword obligatoire.",req) }
-    return api_search(req, params)
+    var copie = req
+    copie.query = "q=" + q
+    return api_search(copie, params)
 }
 
 fn api_search_ia(req: Requete, params: Map<Text>) -> WebResultat {

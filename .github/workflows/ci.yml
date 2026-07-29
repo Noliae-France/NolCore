@@ -34,6 +34,10 @@ jobs:
           test "$TOKEN" != "null" && test -n "$TOKEN"
           curl -fsS http://127.0.0.1:8080/v1/user/me -H "Authorization: Bearer $TOKEN" | jq -e '.email == "ci@example.test"'
           curl -fsS http://127.0.0.1:8080/v1/user/me -b /tmp/cookies.txt | jq -e '.email == "ci@example.test"'
+          curl -fsS -X POST http://127.0.0.1:8080/v1/user/me/changemail \
+            -H 'Content-Type: application/json' -b /tmp/cookies.txt \
+            -d '{"email":"ci-renamed@example.test"}' | jq -e '.updated == true'
+          test "$(curl -sS http://127.0.0.1:8080/v1/user/me -b /tmp/cookies.txt -o /tmp/revoked.out -w '%{http_code}')" = "401"
           docker stop nolcore-smoke
           docker stop nolcore-db
           docker network rm nolcore-ci
