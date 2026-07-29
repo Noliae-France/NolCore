@@ -204,3 +204,10 @@ rotation de secrets, sauvegardes PostgreSQL, TLS, MFA et observabilité doivent
 ## Licence
 
 Voir [LICENSE](LICENSE).
+
+## Documentation du projet
+
+- [Politique de sécurité](SECURITY.md)
+- [Guide de contribution](CONTRIBUTING.md)
+- [Code de conduite](CODE_OF_CONDUCT.md)
+- [Journal des changements](CHANGELOG.md)
