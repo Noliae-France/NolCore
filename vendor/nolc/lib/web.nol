@@ -996,6 +996,18 @@ fn reponse_cookie(r: Reponse, nom: Text, valeur: Text, max_age: Int, http_only: 
     return reponse_avec_entete(r, "Set-Cookie", v)
 }
 
+// Variante pour une session partagée entre sous-domaines contrôlés.
+fn reponse_cookie_domaine(r: Reponse, nom: Text, valeur: Text, max_age: Int, http_only: Bool, secure: Bool, same_site: Text, domaine: Text) -> Reponse {
+    if not web_cookie_sur(nom, valeur) or has(find(domaine, ";")) or has(find(domaine, "\r")) or has(find(domaine, "\n")) { return r }
+    var v = nom + "=" + valeur + "; Path=/"
+    if domaine != "" { v += "; Domain=" + domaine }
+    if max_age >= 0 { v += "; Max-Age=" + text(max_age) }
+    if http_only { v += "; HttpOnly" }
+    if secure { v += "; Secure" }
+    if same_site == "Strict" or same_site == "Lax" or same_site == "None" { v += "; SameSite=" + same_site }
+    return reponse_avec_entete(r, "Set-Cookie", v)
+}
+
 fn reponse_cors(r: Reponse, origine: Text, methodes: Text, entetes: Text) -> Reponse {
     var out = reponse_avec_entete(r, "Access-Control-Allow-Origin", origine)
     out = reponse_avec_entete(out, "Vary", "Origin")

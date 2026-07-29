@@ -205,7 +205,7 @@ fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
     pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
     if not has(token) { return erreur_json(500, "Internal Server Error", "Session indisponible.", req) }
     var rep = reponse_json("{\"token\":" + json_texte(unwrap_or(token, "")) + ",\"user_id\":" + json_texte(id) + "}")
-    if has(cookie) { rep = reponse_cookie(rep, "nol_session", unwrap_or(cookie,""), 86400, true, lower(unwrap_or(env("NOLIAE_COOKIE_SECURE"),"false")) == "true", "Lax") }
+    if has(cookie) { rep = reponse_cookie_domaine(rep, "nol_session", unwrap_or(cookie,""), 86400, true, lower(unwrap_or(env("NOLIAE_COOKIE_SECURE"),"false")) == "true", "Lax", unwrap_or(env("NOLIAE_COOKIE_DOMAIN"),"")) }
     return WebResultat.WebOk(rep)
 }
 
