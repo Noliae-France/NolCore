@@ -1,0 +1,41 @@
+name: NolCore services integration
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout public services
+        run: |
+          git clone --depth 1 https://github.com/Noliae-France/NolCore-Crawler.git /tmp/nolcore-crawler
+          git clone --depth 1 https://github.com/Noliae-France/NolCore-IA.git /tmp/nolcore-ia
+      - uses: docker/setup-buildx-action@v3
+      - name: Build API and service images
+        run: |
+          docker build -t nolcore-api:integration .
+          docker build -t nolcore-crawler:integration /tmp/nolcore-crawler
+          docker build -t nolcore-ia:integration /tmp/nolcore-ia
+      - name: Start service mesh
+        run: |
+          set -e
+          docker network create nolcore-services
+          docker run -d --rm --name nolcore-crawler --network nolcore-services --network-alias crawler nolcore-crawler:integration
+          docker run -d --rm --name nolcore-ia --network nolcore-services --network-alias ia nolcore-ia:integration
+          for service in crawler:8091 ia:8092; do
+            host=${service%:*}; port=${service#*:}
+            for i in $(seq 1 20); do docker run --rm --network nolcore-services curlimages/curl:8.10.1 -fsS "http://$host:$port/api/health" && break || sleep 1; done
+          done
+          docker run -d --rm --name nolcore-api --network nolcore-services --network-alias api \
+            -e NOLIAE_SESSION_SECRET=integration-secret-0123456789-0123456789 \
+            -e NOLCORE_CRAWLER_URL=http://crawler:8091 \
+            -e NOLCORE_IA_URL=http://ia:8092 \
+            -e NOLIAE_PORT=8080 nolcore-api:integration
+          for i in $(seq 1 20); do docker run --rm --network nolcore-services curlimages/curl:8.10.1 -fsS http://api:8080/api/health && break || sleep 1; done
+          docker run --rm --network nolcore-services curlimages/curl:8.10.1 -fsS http://api:8080/api/dependencies | grep -q '"status":"ok"'
+          docker stop nolcore-api nolcore-crawler nolcore-ia
+          docker network rm nolcore-services
