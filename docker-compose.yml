@@ -14,6 +14,13 @@ services:
       NOLIAE_PORT: 8080
       NOLIAE_SESSION_SECRET: ${NOLIAE_SESSION_SECRET:-dev-secret-change-me-please-32chars}
       NOLCORE_DATABASE_URL: postgres://nolcore:nolcore_dev_only@postgres:5432/nolcore
+      NOLCORE_CLAUDE_URL: ${NOLCORE_CLAUDE_URL:-}
+      NOLCORE_CHATGPT_URL: ${NOLCORE_CHATGPT_URL:-}
+      NOLCORE_MISTRAL_URL: ${NOLCORE_MISTRAL_URL:-}
+      NOLCORE_GEMINI_URL: ${NOLCORE_GEMINI_URL:-}
+      NOLCORE_DISCORD_BOT_TOKEN: ${NOLCORE_DISCORD_BOT_TOKEN:-}
+      NOLCORE_DISCORD_GUILD_ID: ${NOLCORE_DISCORD_GUILD_ID:-}
+      NOLCORE_DISCORD_WEBHOOK_URL: ${NOLCORE_DISCORD_WEBHOOK_URL:-}
     ports: ["8080:8080"]
     depends_on: {postgres: {condition: service_healthy}}
 volumes: {nolcore_pg:}
