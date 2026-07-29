@@ -3,11 +3,6 @@ import "../nolc/lib/pg.nol"
 import "../nolc/lib/json.nol"
 import "../nolc/lib/sodium.nol"
 import "../nolc/lib/temps.nol"
-import "accueil.nol"
-import "login.nol"
-import "inscription.nol"
-import "recherche.nol"
-import "tableau.nol"
 import "crawler.nol"
 import "../nolc/lib/http_client.nol"
 import "smtp.nol"
@@ -535,17 +530,6 @@ fn api_crawler(req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json("{\"url\":" + json_texte(unwrap_or(url,"")) + ",\"document_id\":" + json_texte(doc_id) + ",\"content\":" + json_texte(unwrap_or(page,"")) + "}"))
 }
 
-fn page_statique(req: Requete, _params: Map<Text>) -> WebResultat {
-    let contenu = file_read("." + req.chemin)
-    if not has(contenu) { return WebResultat.WebEchec(erreur_http(404, "Not Found", "Ressource introuvable.", requete_id(req))) }
-    return WebResultat.WebOk(reponse_new(200, "OK", type_mime(req.chemin), unwrap_or(contenu, "")))
-}
-
-fn page_connexion(_req: Requete, _params: Map<Text>) -> WebResultat { return WebResultat.WebOk(reponse_html(vue_login("NolCore"))) }
-fn page_inscription(_req: Requete, _params: Map<Text>) -> WebResultat { return WebResultat.WebOk(reponse_html(vue_inscription("NolCore"))) }
-fn page_recherche(_req: Requete, _params: Map<Text>) -> WebResultat { return WebResultat.WebOk(reponse_html(vue_recherche("NolCore"))) }
-fn page_tableau(_req: Requete, _params: Map<Text>) -> WebResultat { return WebResultat.WebOk(reponse_html(vue_tableau("NolCore"))) }
-
 fn application(req: Requete) -> WebResultat {
     var methodes: List<Text> = []
     var patrons: List<Text> = []
@@ -595,12 +579,6 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "POST", "/v1/admin/smtp/", api_admin_smtp_create)
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/crawler/", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_admin_config(r,"crawler") })
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/discord/", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_admin_config(r,"discord") })
-    route_type(methodes, patrons, handlers, "GET", "/connexion", page_connexion)
-    route_type(methodes, patrons, handlers, "GET", "/inscription", page_inscription)
-    route_type(methodes, patrons, handlers, "GET", "/recherche", page_recherche)
-    route_type(methodes, patrons, handlers, "GET", "/tableau", page_tableau)
-    route_type(methodes, patrons, handlers, "GET", "/static/:fichier", page_statique)
-    route_type(methodes, patrons, handlers, "GET", "/", fn (r: Requete, p: Map<Text>) -> WebResultat { return WebResultat.WebOk(reponse_html(vue_accueil("NolCore", "Nolc natif"))) })
     return routeur_dispatch_type(methodes, patrons, handlers, req)
 }
 

@@ -1,6 +1,6 @@
 # Contribuer à NolCore
 
-NolCore est développé en **Nolc natif**. Les fonctionnalités backend ne doivent pas introduire Node.js. Respectez l’architecture MVC : accès PostgreSQL, contrôleurs/routes, vues `.nhtml` et CSS séparés.
+NolCore est développé en **Nolc natif**. Les fonctionnalités backend ne doivent pas introduire Node.js. Le core est API-only ; les fichiers `.nhtml` sont des exemples indicatifs et ne doivent pas être utilisés par le runtime.
 
 ## Vérifications
 

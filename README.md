@@ -28,7 +28,7 @@ Noliae plutôt que de dépendre d’une boîte noire.
 
 | Domaine | Ce que fournit NolCore |
 |---|---|
-| MVC | Routeur Nolc, contrôleurs, vues `.nhtml` et CSS séparés |
+| API | Routeur Nolc, contrôleurs et services natifs ; les `.nhtml` sont indicatifs |
 | Users & Auth | Inscription, connexion, profil, changement de compte, sessions 24 h |
 | Sessions | Cookie signé lié à l’utilisateur, l’email, l’IP, l’horodatage et un nonce aléatoire |
 | IA | Agrégation Claude, ChatGPT, Mistral et Gemini par fournisseur/modèle |
@@ -43,8 +43,7 @@ Noliae plutôt que de dépendre d’une boîte noire.
 ```text
 NolCore
 ├── main.nol                 # routeur + boucle HTTP
-├── *.nhtml                  # Views MVC compilées en Nolc
-├── static/                  # CSS public
+├── *.nhtml                  # Exemples indicatifs, hors du binaire API
 ├── schema.sql               # PostgreSQL et migrations initiales
 ├── crawler.nol              # HTTP + politique robots.txt
 ├── vendor/nolc/lib/         # stdlib Nolc compatible avec le binaire public
@@ -81,7 +80,7 @@ installée dans le cluster si nécessaire. Les tokens IA, SMTP et Discord sont
 également fournis par `nolcore-secrets` ou par un Secret externe (External
 Secrets/Vault), jamais par un fichier versionné.
 
-## Démarrage rapide
+## Démarrage rapide API
 
 ```sh
 git clone https://github.com/Noliae-France/NolCore.git
@@ -89,12 +88,9 @@ cd NolCore
 docker compose up --build
 ```
 
-Ouvrir ensuite :
-
-- [http://localhost:8080](http://localhost:8080) — accueil ;
-- [http://localhost:8080/inscription](http://localhost:8080/inscription) — créer un compte ;
-- [http://localhost:8080/connexion](http://localhost:8080/connexion) — se connecter ;
-- [http://localhost:8080/recherche](http://localhost:8080/recherche) — recherche.
+Le conteneur expose uniquement l’API HTTP sur `http://localhost:8080`.
+Les fichiers `.nhtml` présents dans le dépôt sont des exemples de présentation
+et ne sont ni compilés ni servis par le core.
 
 Les valeurs par défaut de Compose sont destinées au développement local. En
 production, fournir les secrets par l’environnement ou le gestionnaire de
@@ -184,7 +180,6 @@ l’inscription, la connexion Bearer et la session cookie.
 
 ```sh
 # Avec le compilateur Nolc installé
-nolc nhtml accueil.nhtml login.nhtml inscription.nhtml recherche.nhtml tableau.nhtml
 nolc check main.nol
 ```
 
