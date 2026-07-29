@@ -57,7 +57,22 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     if not has(corps) { return erreur_json(400, "Bad Request", "JSON invalide.", req) }
     let message = json_texte_champ(unwrap_or(corps, ""), "message")
     if not has(message) { return erreur_json(422, "Unprocessable Content", "message est obligatoire.", req) }
-    return WebResultat.WebOk(reponse_json("{\"answer\":\"Demande reçue par le service IA NolCore.\",\"message\":" + json_texte(unwrap_or(message, "")) + "}"))
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    var titre = unwrap_or(message, "")
+    if len(titre) > 80 { titre = sub(titre, 0, 80) }
+    let conversation = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO conversations(user_id,title) VALUES($1,$2) RETURNING id", [unwrap_or(id,""), titre])
+    if not has(conversation) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Création de conversation impossible.",req) }
+    let conv = unwrap_or(conversation, ptr_null())
+    let conv_id = unwrap_or(pg_valeur(conv,0,0),"")
+    pg_liberer(conv)
+    let saved = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO messages(conversation_id,role,content) VALUES($1,'user',$2)", [conv_id, unwrap_or(message,"")])
+    if has(saved) { pg_liberer(unwrap_or(saved,ptr_null())) }
+    let answer = "Demande reçue par le service IA NolCore. Configurez NOLCORE_AI_URL pour connecter un fournisseur IA."
+    let saved_answer = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO messages(conversation_id,role,content) VALUES($1,'assistant',$2)", [conv_id, answer])
+    if has(saved_answer) { pg_liberer(unwrap_or(saved_answer,ptr_null())) }
+    pg_fermer(unwrap_or(conn, ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"conversation_id\":" + json_texte(conv_id) + ",\"answer\":" + json_texte(answer) + "}"))
 }
 
 fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
