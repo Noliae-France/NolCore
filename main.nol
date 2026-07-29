@@ -110,8 +110,9 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     if has(saved) { pg_liberer(unwrap_or(saved,ptr_null())) }
     var answer = "Demande reçue par le service IA NolCore. Configurez NOLCORE_AI_URL pour connecter un fournisseur IA."
     let fournisseur = unwrap_or(env("NOLCORE_AI_URL"), "")
-    if fournisseur != "" {
-        let ia = http_post(fournisseur, "application/json", "{\"messages\":[{\"role\":\"user\",\"content\":" + json_texte(unwrap_or(message,"")) + "}]}")
+    let token = unwrap_or(env("NOLCORE_AI_TOKEN"), "")
+    if fournisseur != "" and token != "" {
+        let ia = http_post_token(fournisseur, "application/json", "{\"messages\":[{\"role\":\"user\",\"content\":" + json_texte(unwrap_or(message,"")) + "}]}", token)
         if has(ia) and unwrap_or(ia, ReponseHttp { statut: 0, entetes: "", corps: "" }).statut >= 200 and unwrap_or(ia, ReponseHttp { statut: 0, entetes: "", corps: "" }).statut < 300 { answer = unwrap_or(ia, ReponseHttp { statut: 0, entetes: "", corps: "" }).corps }
     }
     let saved_answer = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO messages(conversation_id,role,content) VALUES($1,'assistant',$2)", [conv_id, answer])
@@ -263,7 +264,7 @@ fn api_ia_modele(req: Requete, params: Map<Text>) -> WebResultat {
     var resultat = "Fournisseur " + fournisseur + " configuré pour le modèle " + modele + "."
     if url != "" and token != "" {
         let corps = "{\"model\":" + json_texte(modele) + ",\"messages\":[{\"role\":\"user\",\"content\":" + json_texte(texte) + "}]}"
-        let rep = http_post(url, "application/json", corps)
+        let rep = http_post_token(url, "application/json", corps, token)
         if has(rep) and unwrap_or(rep, ReponseHttp { statut:0, entetes:"", corps:"" }).statut >= 200 and unwrap_or(rep, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 { resultat = unwrap_or(rep, ReponseHttp { statut:0, entetes:"", corps:"" }).corps }
     }
     return WebResultat.WebOk(reponse_json("{\"provider\":" + json_texte(fournisseur) + ",\"model\":" + json_texte(modele) + ",\"result\":" + json_texte(resultat) + "}"))

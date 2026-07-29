@@ -218,7 +218,7 @@ fn reponse_entete(rep: ReponseHttp, nom: Text) -> Option<Text> {
 // Fabrique une trame de requete HTTP/1.1 bien formee. `corps` vide = pas de
 // Content-Length (typique d'un GET). Renvoie none si un composant contient une
 // injection CRLF (hote / chemin / type de contenu).
-fn hc_construire_requete(methode: Text, u: UrlParties, type_contenu: Text, corps: Text) -> Option<Text> {
+fn hc_construire_requete(methode: Text, u: UrlParties, type_contenu: Text, corps: Text, auth: Text) -> Option<Text> {
     if hc_a_crlf(u.hote) or hc_a_crlf(u.chemin) or hc_a_crlf(type_contenu) or hc_a_crlf(methode) {
         return none
     }
@@ -235,6 +235,7 @@ fn hc_construire_requete(methode: Text, u: UrlParties, type_contenu: Text, corps
     r += "Host: " + hote_ligne + "\r\n"
     r += "User-Agent: nolc-http-client/1.0\r\n"
     r += "Accept: */*\r\n"
+    if auth != "" { r += "Authorization: Bearer " + auth + "\r\n" }
     r += "Connection: close\r\n"
     if corps != "" {
         if type_contenu != "" {
@@ -411,11 +412,11 @@ fn hc_lire_reponse_tls(ssl: Ptr<TlsSession>, taille_max: Int) -> Option<Text> {
 // Effectue UNE requete https:// avec validation stricte du certificat, du nom
 // d'hote et SNI (voir lib/tls.nol). none en cas d'echec (connexion TCP, contexte
 // TLS, handshake/validation refuses, construction ou lecture).
-fn hc_requete_une_https(methode: Text, u: UrlParties, type_contenu: Text, corps: Text, timeout_ms: Int, taille_max: Int) -> Option<ReponseHttp> {
+fn hc_requete_une_https(methode: Text, u: UrlParties, type_contenu: Text, corps: Text, timeout_ms: Int, taille_max: Int, auth: Text) -> Option<ReponseHttp> {
     if not hc_hote_valide(u.hote) {
         return none
     }
-    let req = hc_construire_requete(methode, u, type_contenu, corps)
+    let req = hc_construire_requete(methode, u, type_contenu, corps, auth)
     if not has(req) {
         return none
     }
@@ -460,9 +461,9 @@ fn hc_requete_une_https(methode: Text, u: UrlParties, type_contenu: Text, corps:
 // Effectue UNE requete (pas de suivi de redirection). Aiguille http:// (clair)
 // et https:// (TLS valide). none en cas d'echec (schema non gere, connexion,
 // construction, lecture).
-fn hc_requete_une(methode: Text, u: UrlParties, type_contenu: Text, corps: Text, timeout_ms: Int, taille_max: Int) -> Option<ReponseHttp> {
+fn hc_requete_une(methode: Text, u: UrlParties, type_contenu: Text, corps: Text, timeout_ms: Int, taille_max: Int, auth: Text) -> Option<ReponseHttp> {
     if u.schema == "https" {
-        return hc_requete_une_https(methode, u, type_contenu, corps, timeout_ms, taille_max)
+        return hc_requete_une_https(methode, u, type_contenu, corps, timeout_ms, taille_max, auth)
     }
     if u.schema != "http" {
         // Schema non gere : refus honnete.
@@ -471,7 +472,7 @@ fn hc_requete_une(methode: Text, u: UrlParties, type_contenu: Text, corps: Text,
     if not hc_hote_valide(u.hote) {
         return none
     }
-    let req = hc_construire_requete(methode, u, type_contenu, corps)
+    let req = hc_construire_requete(methode, u, type_contenu, corps, auth)
     if not has(req) {
         return none
     }
@@ -545,7 +546,7 @@ fn hc_resoudre_location(courant: UrlParties, location: Text) -> Option<UrlPartie
 // Requete avec suivi des redirections 301/302/303/307/308 (limite + detection
 // de boucle). Pour 301/302/303 la methode passe a GET et le corps est
 // abandonne ; 307/308 preservent methode et corps.
-fn hc_requete_suivie(methode0: Text, u0: UrlParties, type_contenu0: Text, corps0: Text, max_redir: Int, timeout_ms: Int, taille_max: Int) -> Option<ReponseHttp> {
+fn hc_requete_suivie(methode0: Text, u0: UrlParties, type_contenu0: Text, corps0: Text, max_redir: Int, timeout_ms: Int, taille_max: Int, auth: Text) -> Option<ReponseHttp> {
     var methode = methode0
     var type_contenu = type_contenu0
     var corps = corps0
@@ -554,7 +555,7 @@ fn hc_requete_suivie(methode0: Text, u0: UrlParties, type_contenu0: Text, corps0
     push(visites, url_rendu(courant))
     var sauts = 0
     while true {
-        let rep = hc_requete_une(methode, courant, type_contenu, corps, timeout_ms, taille_max)
+        let rep = hc_requete_une(methode, courant, type_contenu, corps, timeout_ms, taille_max, auth)
         if not has(rep) {
             return none
         }
@@ -607,7 +608,7 @@ fn http_get(url: Text) -> Option<ReponseHttp> {
     if not has(u) {
         return none
     }
-    return hc_requete_suivie("GET", unwrap_or(u, UrlParties { schema: "http", hote: "", port: 80, chemin: "/" }), "", "", hc_redirections_max(), hc_timeout_defaut_ms(), hc_taille_max_defaut())
+    return hc_requete_suivie("GET", unwrap_or(u, UrlParties { schema: "http", hote: "", port: 80, chemin: "/" }), "", "", hc_redirections_max(), hc_timeout_defaut_ms(), hc_taille_max_defaut(), "")
 }
 
 // POST avec corps et type de contenu, suivi de redirection.
@@ -616,7 +617,13 @@ fn http_post(url: Text, type_contenu: Text, corps: Text) -> Option<ReponseHttp> 
     if not has(u) {
         return none
     }
-    return hc_requete_suivie("POST", unwrap_or(u, UrlParties { schema: "http", hote: "", port: 80, chemin: "/" }), type_contenu, corps, hc_redirections_max(), hc_timeout_defaut_ms(), hc_taille_max_defaut())
+    return hc_requete_suivie("POST", unwrap_or(u, UrlParties { schema: "http", hote: "", port: 80, chemin: "/" }), type_contenu, corps, hc_redirections_max(), hc_timeout_defaut_ms(), hc_taille_max_defaut(), "")
+}
+
+fn http_post_token(url: Text, type_contenu: Text, corps: Text, token: Text) -> Option<ReponseHttp> {
+    let u = url_parse(url)
+    if not has(u) { return none }
+    return hc_requete_suivie("POST", unwrap_or(u, UrlParties { schema: "http", hote: "", port: 80, chemin: "/" }), type_contenu, corps, hc_redirections_max(), hc_timeout_defaut_ms(), hc_taille_max_defaut(), token)
 }
 
 // GET sans suivre les redirections (rend la 3xx telle quelle).
@@ -625,5 +632,5 @@ fn http_get_direct(url: Text) -> Option<ReponseHttp> {
     if not has(u) {
         return none
     }
-    return hc_requete_une("GET", unwrap_or(u, UrlParties { schema: "http", hote: "", port: 80, chemin: "/" }), "", "", hc_timeout_defaut_ms(), hc_taille_max_defaut())
+    return hc_requete_une("GET", unwrap_or(u, UrlParties { schema: "http", hote: "", port: 80, chemin: "/" }), "", "", hc_timeout_defaut_ms(), hc_taille_max_defaut(), "")
 }
