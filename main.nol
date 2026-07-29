@@ -258,7 +258,10 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     let answer = unwrap_or(ia,ReponseHttp { statut:0, entetes:"", corps:"" }).corps
     let saved_answer = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO messages(conversation_id,role,content) VALUES($1,'assistant',$2)", [conv_id, answer])
     if has(saved_answer) { pg_liberer(unwrap_or(saved_answer,ptr_null())) }
-    let cost = pg_requete_params(unwrap_or(conn,ptr_null()),"INSERT INTO ai_usage(user_id,conversation_id,provider,model,input_chars,output_chars) VALUES($1,$2,$3,$4,$5,$6)",[unwrap_or(id,""),conv_id,fournisseur,modele,text(len(unwrap_or(message,""))),text(len(answer))])
+    let input_tokens = unwrap_or(json_chemin_int(answer,"input_tokens"),0)
+    let output_tokens = unwrap_or(json_chemin_int(answer,"output_tokens"),0)
+    let estimated_cost = unwrap_or(json_chemin_int(answer,"estimated_cost_micros"),0)
+    let cost = pg_requete_params(unwrap_or(conn,ptr_null()),"INSERT INTO ai_usage(user_id,conversation_id,provider,model,input_chars,output_chars,estimated_cost_micros) VALUES($1,$2,$3,$4,$5,$6,$7)",[unwrap_or(id,""),conv_id,fournisseur,modele,text(input_tokens),text(output_tokens),text(estimated_cost)])
     if has(cost) { pg_liberer(unwrap_or(cost,ptr_null())) }
     pg_fermer(unwrap_or(conn, ptr_null()))
     return WebResultat.WebOk(reponse_json("{\"conversation_id\":" + json_texte(conv_id) + ",\"answer\":" + json_texte(answer) + "}"))
