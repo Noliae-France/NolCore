@@ -8,6 +8,7 @@ import "login.nol"
 import "inscription.nol"
 import "recherche.nol"
 import "tableau.nol"
+import "crawler.nol"
 
 fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
 
@@ -183,6 +184,18 @@ fn api_admin_users(req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json(items))
 }
 
+fn api_crawler(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let corps = requete_json(req)
+    if not has(corps) { return erreur_json(400, "Bad Request", "JSON invalide.", req) }
+    let url = json_texte_champ(unwrap_or(corps, ""), "url")
+    if not has(url) { return erreur_json(422, "Unprocessable Content", "url est obligatoire.", req) }
+    let page = crawler_get_respectueux(unwrap_or(url, ""))
+    if not has(page) { return erreur_json(403, "Forbidden", "URL refusée par robots.txt ou inaccessible.", req) }
+    return WebResultat.WebOk(reponse_json("{\"url\":" + json_texte(unwrap_or(url,"")) + ",\"content\":" + json_texte(unwrap_or(page,"")) + "}"))
+}
+
 fn page_statique(req: Requete, _params: Map<Text>) -> WebResultat {
     let contenu = file_read("." + req.chemin)
     if not has(contenu) { return WebResultat.WebEchec(erreur_http(404, "Not Found", "Ressource introuvable.", requete_id(req))) }
@@ -210,6 +223,7 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "GET", "/v1/user", api_me)
     route_type(methodes, patrons, handlers, "GET", "/v1/ia", api_chat)
     route_type(methodes, patrons, handlers, "POST", "/v1/ia", api_chat)
+    route_type(methodes, patrons, handlers, "POST", "/v1/crawler", api_crawler)
     route_type(methodes, patrons, handlers, "GET", "/v1/search", api_search)
     route_type(methodes, patrons, handlers, "GET", "/v1/perms", api_me)
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/users", api_admin_users)
