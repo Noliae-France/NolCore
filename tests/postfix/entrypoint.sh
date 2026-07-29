@@ -42,8 +42,10 @@ printf '%s\n' \
   'mail_location = maildir:~/Maildir' \
   'ssl = no' \
   'disable_plaintext_auth = no' \
-  'userdb { driver = passwd }' \
-  'passdb { driver = passwd }' \
+  'userdb passwd {' \
+  '}' \
+  'passdb pam {' \
+  '}' \
   > /etc/dovecot/dovecot.conf
 dovecot
 
