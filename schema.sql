@@ -6,4 +6,5 @@ CREATE INDEX IF NOT EXISTS documents_search_idx ON documents USING GIN(search_ve
 CREATE TABLE IF NOT EXISTS permissions (code TEXT PRIMARY KEY, description TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS user_permissions (user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, permission_code TEXT REFERENCES permissions(code) ON DELETE CASCADE, PRIMARY KEY(user_id, permission_code));
 CREATE TABLE IF NOT EXISTS audit_logs (id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, action TEXT NOT NULL, resource TEXT NOT NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS audit_search_rate_idx ON audit_logs(action, created_at);
 INSERT INTO permissions(code,description) VALUES ('users.read','Lire les utilisateurs'),('users.manage','Gérer les utilisateurs'),('admin.read','Accéder à l’administration'),('documents.write','Créer des documents'),('ai.use','Utiliser l’interface IA') ON CONFLICT DO NOTHING;
