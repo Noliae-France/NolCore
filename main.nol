@@ -206,6 +206,101 @@ fn api_permissions(req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json(items))
 }
 
+fn parametre(params: Map<Text>, nom: Text) -> Text { return unwrap_or(map_get(params, nom), "") }
+
+fn api_ia_modele(req: Requete, params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let fournisseur = parametre(params, "nameid")
+    let modele = parametre(params, "modelia")
+    let texte = parametre(params, "text")
+    if fournisseur == "" or modele == "" or texte == "" { return erreur_json(422,"Unprocessable Content","Fournisseur, modèle et texte sont obligatoires.",req) }
+    let cle = "NOLCORE_" + upper(fournisseur) + "_URL"
+    let url = unwrap_or(env(cle), "")
+    var resultat = "Fournisseur " + fournisseur + " configuré pour le modèle " + modele + "."
+    if url != "" {
+        let corps = "{\"model\":" + json_texte(modele) + ",\"messages\":[{\"role\":\"user\",\"content\":" + json_texte(texte) + "}]}"
+        let rep = http_post(url, "application/json", corps)
+        if has(rep) and unwrap_or(rep, ReponseHttp { statut:0, entetes:"", corps:"" }).statut >= 200 and unwrap_or(rep, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 { resultat = unwrap_or(rep, ReponseHttp { statut:0, entetes:"", corps:"" }).corps }
+    }
+    return WebResultat.WebOk(reponse_json("{\"provider\":" + json_texte(fournisseur) + ",\"model\":" + json_texte(modele) + ",\"result\":" + json_texte(resultat) + "}"))
+}
+
+fn api_user_reset(req: Requete, _params: Map<Text>) -> WebResultat {
+    if not has(utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    return api_user_password(req, "reset")
+}
+
+fn api_user_password(req: Requete, _mode: Text) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let nouveau = champ_entree(req, "password")
+    if not has(nouveau) or len(unwrap_or(nouveau,"")) < 8 { return erreur_json(422,"Unprocessable Content","password doit contenir au moins 8 caractères.",req) }
+    let hash = mot_de_passe_hache(bytes_from_text(unwrap_or(nouveau,"")))
+    if not has(hash) { return erreur_json(500,"Internal Server Error","Hachage indisponible.",req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE users SET password_hash=$1 WHERE id=$2", [unwrap_or(hash,""),unwrap_or(id,"")])
+    if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"updated\":true}"))
+}
+
+fn api_user_field(req: Requete, champ: Text) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let valeur = champ_entree(req, champ)
+    if not has(valeur) or unwrap_or(valeur,"") == "" { return erreur_json(422,"Unprocessable Content","Valeur obligatoire.",req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    var sql = "UPDATE users SET display_name=$1 WHERE id=$2"
+    if champ == "email" { sql = "UPDATE users SET email=$1 WHERE id=$2" }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), sql, [unwrap_or(valeur,""),unwrap_or(id,"")])
+    if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"updated\":true}"))
+}
+
+fn api_search_text(req: Requete, params: Map<Text>) -> WebResultat {
+    let q = parametre(params, "keyword")
+    if q == "" { return erreur_json(422,"Unprocessable Content","keyword obligatoire.",req) }
+    return api_search(req, params)
+}
+
+fn api_search_ia(req: Requete, params: Map<Text>) -> WebResultat {
+    let keyword = parametre(params, "keyword")
+    if keyword == "" { return erreur_json(422,"Unprocessable Content","keyword obligatoire.",req) }
+    var p: Map<Text> = map_new()
+    map_set(p, "nameid", "mistral")
+    map_set(p, "modelia", "search")
+    map_set(p, "text", keyword)
+    return api_ia_modele(req, p)
+}
+
+fn api_crawler_visite(req: Requete, params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let url = parametre(params,"url")
+    let page = crawler_get_respectueux(url)
+    if not has(page) { return erreur_json(403,"Forbidden","URL refusée par robots.txt ou inaccessible.",req) }
+    return WebResultat.WebOk(reponse_json("{\"url\":" + json_texte(url) + ",\"visited\":true}"))
+}
+
+fn api_crawler_result(req: Requete, params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let url = parametre(params,"url")
+    let conn = db()
+    if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT id,title,content FROM documents WHERE owner_id=$1 AND title=$2 ORDER BY id DESC LIMIT 1", [unwrap_or(id,""),url])
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(404,"Not Found","Résultat introuvable.",req) }
+    let sortie = unwrap_or(res,ptr_null())
+    if pg_lignes(sortie) != 1 { pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(404,"Not Found","Résultat introuvable.",req) }
+    let answer = "{\"id\":" + json_texte(unwrap_or(pg_valeur(sortie,0,0),"")) + ",\"url\":" + json_texte(url) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(sortie,0,2),"")) + "}"
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json(answer))
+}
+
 fn api_crawler(req: Requete, _params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
     if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
@@ -259,6 +354,19 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/", api_admin_users)
     route_type(methodes, patrons, handlers, "POST", "/v1/auth/register", api_register)
     route_type(methodes, patrons, handlers, "POST", "/v1/auth/login", api_login)
+    route_type(methodes, patrons, handlers, "POST", "/v1/user/register", api_register)
+    route_type(methodes, patrons, handlers, "POST", "/v1/user/login", api_login)
+    route_type(methodes, patrons, handlers, "GET", "/v1/user/me", api_me)
+    route_type(methodes, patrons, handlers, "POST", "/v1/user/resetpassword", api_user_reset)
+    route_type(methodes, patrons, handlers, "POST", "/v1/user/me/changepassword", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_user_password(r, "change") })
+    route_type(methodes, patrons, handlers, "POST", "/v1/user/me/changemail", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_user_field(r, "email") })
+    route_type(methodes, patrons, handlers, "POST", "/v1/user/me/changename", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_user_field(r, "name") })
+    route_type(methodes, patrons, handlers, "POST", "/v1/ia/:nameid/:modelia/:text", api_ia_modele)
+    route_type(methodes, patrons, handlers, "GET", "/v1/search/text/:keyword", api_search_text)
+    route_type(methodes, patrons, handlers, "GET", "/v1/search/img/:keyword", api_search_text)
+    route_type(methodes, patrons, handlers, "GET", "/v1/search/ia/:keyword", api_search_ia)
+    route_type(methodes, patrons, handlers, "POST", "/v1/crawler/visite/:url", api_crawler_visite)
+    route_type(methodes, patrons, handlers, "GET", "/v1/crawler/result/:url", api_crawler_result)
     route_type(methodes, patrons, handlers, "GET", "/connexion", page_connexion)
     route_type(methodes, patrons, handlers, "GET", "/inscription", page_inscription)
     route_type(methodes, patrons, handlers, "GET", "/recherche", page_recherche)
