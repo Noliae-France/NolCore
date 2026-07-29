@@ -146,7 +146,8 @@ POST /v1/discord/webhook
 Configuration Discord : `NOLCORE_DISCORD_BOT_TOKEN`,
 `NOLCORE_DISCORD_GUILD_ID` et `NOLCORE_DISCORD_WEBHOOK_URL`.
 
-Les profils SMTP utilisent SMTPS avec validation TLS sur le port `465`.
+Les profils SMTP sont obligatoirement chiffrés : `465` utilise SMTPS implicite
+et `587` utilise STARTTLS. Tout autre port est refusé par le worker SMTP.
 Le mot de passe reste dans l’environnement indiqué par `secret_env` ; il n’est
 jamais stocké dans PostgreSQL.
 

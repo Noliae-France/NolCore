@@ -38,6 +38,15 @@ jobs:
             -H 'Content-Type: application/json' -b /tmp/cookies.txt \
             -d '{"email":"ci-renamed@example.test"}' | jq -e '.updated == true'
           test "$(curl -sS http://127.0.0.1:8080/v1/user/me -b /tmp/cookies.txt -o /tmp/revoked.out -w '%{http_code}')" = "401"
+          docker exec nolcore-db psql -U nolcore -d nolcore -c "UPDATE users SET role='admin' WHERE email='ci-renamed@example.test'"
+          curl -fsS http://127.0.0.1:8080/v1/admin/user/ -b /tmp/cookies.txt | jq -e 'type == "array"'
+          curl -fsS -X POST http://127.0.0.1:8080/v1/admin/smtp/ \
+            -H 'Content-Type: application/json' -b /tmp/cookies.txt \
+            -d '{"id":"ci-smtp","host":"smtp.example.test","port":"465","username":"ci@example.test","secret_env":"CI_SMTP_PASSWORD"}' | jq -e '.configured == true'
+          curl -fsS -X POST http://127.0.0.1:8080/api/documents \
+            -H 'Content-Type: application/json' -b /tmp/cookies.txt \
+            -d '{"title":"CI hello","content":"hello NolCore search"}' | jq -e '.id != null'
+          curl -fsS http://127.0.0.1:8080/v1/search/text/hello -b /tmp/cookies.txt | jq -e 'length >= 1'
           docker stop nolcore-smoke
           docker stop nolcore-db
           docker network rm nolcore-ci
