@@ -1,0 +1,34 @@
+import "/opt/nolc/lib/web_serveur.nol"
+import "/opt/nolc/lib/pg.nol"
+
+fn api_sante(_req: Requete, _params: Map<Text>) -> WebResultat {
+    return WebResultat.WebOk(reponse_json("{\"status\":\"ok\",\"runtime\":\"nolc\",\"service\":\"nolcore\"}"))
+}
+
+fn api_capacites(_req: Requete, _params: Map<Text>) -> WebResultat {
+    return WebResultat.WebOk(reponse_json("{\"modules\":[\"users\",\"auth\",\"ia\",\"recherche\",\"postgresql\",\"permissions\",\"administration\"]}"))
+}
+
+fn application(req: Requete) -> WebResultat {
+    var methodes: List<Text> = []
+    var patrons: List<Text> = []
+    var handlers: List<Fn(Requete, Map<Text>) -> WebResultat> = []
+    route_type(methodes, patrons, handlers, "GET", "/api/health", api_sante)
+    route_type(methodes, patrons, handlers, "GET", "/api/capacites", api_capacites)
+    route_type(methodes, patrons, handlers, "GET", "/", fn (r: Requete, p: Map<Text>) -> WebResultat { return WebResultat.WebOk(reponse_html(vue_accueil("NolCore", "Nolc natif"))) })
+    return routeur_dispatch_type(methodes, patrons, handlers, req)
+}
+
+fn main() {
+    let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
+    if len(secret) < 32 { print("NOLIAE_SESSION_SECRET doit contenir au moins 32 caracteres"); return }
+    let port = unwrap_or(parse_int(unwrap_or(env("NOLIAE_PORT"), "8080")), 8080)
+    let base = web_serveur_config(port)
+    let config = WebServeurConfig { adresse: unwrap_or(env("NOLIAE_BIND"), "0.0.0.0"), port: base.port, travailleurs: 4, file_connexions: 256, budget_requete: base.budget_requete, max_statique: base.max_statique, racine_statique: ".", prefixe_statique: "/static/", cache_statique_secondes: 3600, arret_token: "", limites: base.limites }
+    var pre: List<Fn(Requete) -> Option<Reponse>> = []
+    var post: List<Fn(Requete, Reponse) -> Reponse> = []
+    push(post, middleware_securite)
+    push(post, middleware_request_id)
+    print("NolCore sur http://0.0.0.0:" + text(port))
+    if not web_servir(config, application, pre, post) { print("demarrage impossible") }
+}
