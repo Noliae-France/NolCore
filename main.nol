@@ -9,6 +9,7 @@ import "inscription.nol"
 import "recherche.nol"
 import "tableau.nol"
 import "crawler.nol"
+import "../nolc/lib/http_client.nol"
 
 fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
 
@@ -76,7 +77,12 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     pg_liberer(conv)
     let saved = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO messages(conversation_id,role,content) VALUES($1,'user',$2)", [conv_id, unwrap_or(message,"")])
     if has(saved) { pg_liberer(unwrap_or(saved,ptr_null())) }
-    let answer = "Demande reçue par le service IA NolCore. Configurez NOLCORE_AI_URL pour connecter un fournisseur IA."
+    var answer = "Demande reçue par le service IA NolCore. Configurez NOLCORE_AI_URL pour connecter un fournisseur IA."
+    let fournisseur = unwrap_or(env("NOLCORE_AI_URL"), "")
+    if fournisseur != "" {
+        let ia = http_post(fournisseur, "application/json", "{\"messages\":[{\"role\":\"user\",\"content\":" + json_texte(unwrap_or(message,"")) + "}]}")
+        if has(ia) and unwrap_or(ia, ReponseHttp { statut: 0, entetes: "", corps: "" }).statut >= 200 and unwrap_or(ia, ReponseHttp { statut: 0, entetes: "", corps: "" }).statut < 300 { answer = unwrap_or(ia, ReponseHttp { statut: 0, entetes: "", corps: "" }).corps }
+    }
     let saved_answer = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO messages(conversation_id,role,content) VALUES($1,'assistant',$2)", [conv_id, answer])
     if has(saved_answer) { pg_liberer(unwrap_or(saved_answer,ptr_null())) }
     pg_fermer(unwrap_or(conn, ptr_null()))
@@ -184,6 +190,22 @@ fn api_admin_users(req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json(items))
 }
 
+fn api_permissions(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT permission_code FROM user_permissions WHERE user_id=$1 ORDER BY permission_code", [unwrap_or(id,"")])
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Lecture des permissions impossible.",req) }
+    let sortie = unwrap_or(res,ptr_null())
+    var items = "["
+    var i = 0
+    while i < pg_lignes(sortie) { if i > 0 { items = items + "," }; items = items + json_texte(unwrap_or(pg_valeur(sortie,i,0),"")); i = i + 1 }
+    items = items + "]"
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json(items))
+}
+
 fn api_crawler(req: Requete, _params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
     if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
@@ -225,7 +247,7 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "POST", "/v1/ia", api_chat)
     route_type(methodes, patrons, handlers, "POST", "/v1/crawler", api_crawler)
     route_type(methodes, patrons, handlers, "GET", "/v1/search", api_search)
-    route_type(methodes, patrons, handlers, "GET", "/v1/perms", api_me)
+    route_type(methodes, patrons, handlers, "GET", "/v1/perms", api_permissions)
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/users", api_admin_users)
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/", api_admin_users)
     route_type(methodes, patrons, handlers, "POST", "/v1/auth/register", api_register)
