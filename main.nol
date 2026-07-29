@@ -1,5 +1,22 @@
-import "/opt/nolc/lib/web_serveur.nol"
-import "/opt/nolc/lib/pg.nol"
+import "../Noliae Lang/lib/web_serveur.nol"
+import "../Noliae Lang/lib/pg.nol"
+import "../Noliae Lang/lib/json.nol"
+import "../Noliae Lang/lib/sodium.nol"
+import "../Noliae Lang/lib/temps.nol"
+
+fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
+
+fn erreur_json(code: Int, titre: Text, detail: Text, req: Requete) -> WebResultat {
+    return WebResultat.WebEchec(erreur_http(code, titre, detail, requete_id(req)))
+}
+
+fn utilisateur(req: Requete, secret: Text) -> Option<Text> {
+    let token = requete_bearer(req)
+    if not has(token) { return none }
+    let session = session_verifie(secret, unwrap_or(token, ""), maintenant_epoch())
+    if not has(session) { return none }
+    return some(unwrap_or(session, SessionSigne { sujet: "", expiration: 0, nonce: "" }).sujet)
+}
 
 fn api_sante(_req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json("{\"status\":\"ok\",\"runtime\":\"nolc\",\"service\":\"nolcore\"}"))
@@ -9,12 +26,47 @@ fn api_capacites(_req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json("{\"modules\":[\"users\",\"auth\",\"ia\",\"recherche\",\"postgresql\",\"permissions\",\"administration\"]}"))
 }
 
+fn api_register(req: Requete, _params: Map<Text>) -> WebResultat {
+    let corps = requete_json(req)
+    if not has(corps) { return erreur_json(400, "Bad Request", "JSON invalide.", req) }
+    let source = unwrap_or(corps, "")
+    let email = json_texte_champ(source, "email")
+    let nom = json_texte_champ(source, "name")
+    let mot = json_texte_champ(source, "password")
+    if not has(email) or not has(nom) or not has(mot) { return erreur_json(422, "Unprocessable Content", "email, name et password sont obligatoires.", req) }
+    let secret = bytes_from_text(unwrap_or(mot, ""))
+    let hash = mot_de_passe_hache(secret)
+    if not has(hash) { return erreur_json(500, "Internal Server Error", "Hachage indisponible.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO users(email,display_name,password_hash) VALUES($1,$2,$3) RETURNING id,email,display_name,role", [unwrap_or(email, ""), unwrap_or(nom, ""), unwrap_or(hash, "")])
+    if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(409, "Conflict", "Email déjà utilisé.", req) }
+    let sortie = unwrap_or(res, ptr_null())
+    let id = unwrap_or(pg_valeur(sortie, 0, 0), "")
+    let payload = "{\"id\":" + json_texte(id) + ",\"email\":" + json_texte(unwrap_or(email, "")) + ",\"name\":" + json_texte(unwrap_or(nom, "")) + "}"
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
+    return WebResultat.WebOk(reponse_json(payload))
+}
+
+fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
+    let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
+    let id = utilisateur(req, secret)
+    if not has(id) { return erreur_json(401, "Unauthorized", "Bearer Nolc requis.", req) }
+    let corps = requete_json(req)
+    if not has(corps) { return erreur_json(400, "Bad Request", "JSON invalide.", req) }
+    let message = json_texte_champ(unwrap_or(corps, ""), "message")
+    if not has(message) { return erreur_json(422, "Unprocessable Content", "message est obligatoire.", req) }
+    return WebResultat.WebOk(reponse_json("{\"answer\":\"Demande reçue par le service IA NolCore.\",\"message\":" + json_texte(unwrap_or(message, "")) + "}"))
+}
+
 fn application(req: Requete) -> WebResultat {
     var methodes: List<Text> = []
     var patrons: List<Text> = []
     var handlers: List<Fn(Requete, Map<Text>) -> WebResultat> = []
     route_type(methodes, patrons, handlers, "GET", "/api/health", api_sante)
     route_type(methodes, patrons, handlers, "GET", "/api/capacites", api_capacites)
+    route_type(methodes, patrons, handlers, "POST", "/api/auth/register", api_register)
+    route_type(methodes, patrons, handlers, "POST", "/api/chat", api_chat)
     route_type(methodes, patrons, handlers, "GET", "/", fn (r: Requete, p: Map<Text>) -> WebResultat { return WebResultat.WebOk(reponse_html(vue_accueil("NolCore", "Nolc natif"))) })
     return routeur_dispatch_type(methodes, patrons, handlers, req)
 }
