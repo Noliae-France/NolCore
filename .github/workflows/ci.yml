@@ -60,7 +60,7 @@ jobs:
             -d "{\"token\":\"$RESET_TOKEN\",\"password\":\"ci-password-321\"}" | jq -e '.updated == true'
           curl -fsS -X POST http://127.0.0.1:8080/v1/user/login \
             -H 'Content-Type: application/json' \
-            -c /tmp/cookies.txt -d '{"email":"ci@example.test","password":"ci-password-321"}' > /tmp/login.json
+            -c /tmp/cookies.txt -d '{"email":"ci@example.test","password":"ci-password-321"}' > /tmp/login.json || { cat /tmp/login.json; exit 1; }
           TOKEN=$(jq -r .token /tmp/login.json)
           test "$TOKEN" != "null" && test -n "$TOKEN"
           curl -fsS http://127.0.0.1:8080/v1/user/me -H "Authorization: Bearer $TOKEN" | jq -e '.email == "ci@example.test"'
