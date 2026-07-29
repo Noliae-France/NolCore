@@ -3,6 +3,28 @@ CREATE TABLE IF NOT EXISTS conversations (id BIGSERIAL PRIMARY KEY, user_id BIGI
 CREATE TABLE IF NOT EXISTS messages (id BIGSERIAL PRIMARY KEY, conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS documents (id BIGSERIAL PRIMARY KEY, owner_id BIGINT REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, content TEXT NOT NULL, search_vector TSVECTOR GENERATED ALWAYS AS (to_tsvector('french', title || ' ' || content)) STORED);
 CREATE INDEX IF NOT EXISTS documents_search_idx ON documents USING GIN(search_vector);
+-- Index public alimenté uniquement par NolCore-Crawler. Les documents privés
+-- restent dans `documents` et ne sont jamais mélangés à cet index.
+CREATE TABLE IF NOT EXISTS public_search_documents (
+  id BIGSERIAL PRIMARY KEY,
+  url TEXT UNIQUE NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'crawler',
+  crawled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  search_vector TSVECTOR GENERATED ALWAYS AS (to_tsvector('french', title || ' ' || content)) STORED
+);
+CREATE INDEX IF NOT EXISTS public_search_documents_search_idx ON public_search_documents USING GIN(search_vector);
+CREATE TABLE IF NOT EXISTS search_crawl_queue (
+  url TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','crawling','complete','failed')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at TIMESTAMPTZ,
+  crawled_at TIMESTAMPTZ,
+  last_error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS search_crawl_queue_pending_idx ON search_crawl_queue(status, requested_at);
 CREATE TABLE IF NOT EXISTS permissions (code TEXT PRIMARY KEY, description TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS user_permissions (user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, permission_code TEXT REFERENCES permissions(code) ON DELETE CASCADE, PRIMARY KEY(user_id, permission_code));
 CREATE TABLE IF NOT EXISTS audit_logs (id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, action TEXT NOT NULL, resource TEXT NOT NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT now());

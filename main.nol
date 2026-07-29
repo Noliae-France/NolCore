@@ -38,6 +38,20 @@ fn url_query_brave(v: Text) -> Text {
     return out
 }
 
+// Brave sert uniquement d'amorce : les URL retournées sont déposées dans une
+// file PostgreSQL, puis le worker crawler les visite hors du chemin utilisateur.
+fn planifier_crawl_brave(conn: Ptr<PgConn>, corps: Text) {
+    var i = 0
+    while i < 10 {
+        let url = json_chemin_texte(corps, "web.results." + text(i) + ".url")
+        if has(url) and starts_with(unwrap_or(url, ""), "https://") {
+            let added = pg_requete_params(conn, "INSERT INTO search_crawl_queue(url) VALUES($1) ON CONFLICT (url) DO NOTHING", [unwrap_or(url, "")])
+            if has(added) { pg_liberer(unwrap_or(added, ptr_null())) }
+        }
+        i = i + 1
+    }
+}
+
 // CORS n'est jamais ouvert à "*" : les applications déployées sont déclarées
 // dans NOLCORE_ALLOWED_ORIGINS, séparées par des virgules. Cela permet de
 // changer de domaine sans modifier ni recompiler le Core.
@@ -282,25 +296,30 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     let rate = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT count(*) FROM audit_logs WHERE action='search' AND metadata->>'key'=$1 AND created_at > now() - interval '1 minute'", [cle_rate])
     if has(rate) and unwrap_or(parse_int(unwrap_or(pg_valeur(unwrap_or(rate,ptr_null()),0,0),"0")),0) >= 60 { pg_liberer(unwrap_or(rate,ptr_null())); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(429,"Too Many Requests","Limite de recherche atteinte, réessayez dans une minute.",req) }
     if has(rate) { pg_liberer(unwrap_or(rate,ptr_null())) }
-    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,title,content FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank(search_vector, plainto_tsquery('french',$2)) DESC LIMIT 30", [unwrap_or(id, ""), unwrap_or(q, "")])
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,content,source FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank(search_vector, plainto_tsquery('french',$1)) DESC LIMIT 30", [unwrap_or(q, "")])
     if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
     let sortie = unwrap_or(res, ptr_null())
     var items = "["
     var i = 0
     while i < pg_lignes(sortie) {
         if i > 0 { items = items + "," }
-        items = items + "{\"id\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 0), "")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 1), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 2), "")) + "}"
+        items = items + "{\"url\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 0), "")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 1), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 2), "")) + ",\"source\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 3), "crawler")) + "}"
         i = i + 1
     }
     items = items + "]"
-    // Brave complète l'index privé/crawler lorsque la clé est configurée.
-    let brave_token = unwrap_or(env("NOLCORE_BRAVE_SEARCH_TOKEN"), "")
-    if brave_token != "" {
-        let brave = http_get_token("https://api.search.brave.com/res/v1/web/search?q=" + url_query_brave(unwrap_or(q,"")) + "&count=10&country=FR&search_lang=fr", "X-Subscription-Token " + brave_token)
-        if has(brave) and unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 {
-            items = "{\"crawler\":" + items + ",\"brave\":" + unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"{}" }).corps + "}"
-        }
-    }
+    // Premier passage : Brave répond tout de suite et ses URL sont mises en
+    // file. Les passages suivants trouvent l'index local du crawler.
+    if pg_lignes(sortie) == 0 {
+        let brave_token = unwrap_or(env("NOLCORE_BRAVE_SEARCH_TOKEN"), "")
+        if brave_token != "" {
+            let brave = http_get_token("https://api.search.brave.com/res/v1/web/search?q=" + url_query_brave(unwrap_or(q,"")) + "&count=10&country=FR&search_lang=fr", "X-Subscription-Token " + brave_token)
+            if has(brave) and unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 {
+                let corps_brave = unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"{}" }).corps
+                planifier_crawl_brave(unwrap_or(conn, ptr_null()), corps_brave)
+                items = "{\"source\":\"brave\",\"results\":" + unwrap_or(json_chemin(corps_brave, "web.results"), "[]") + "}"
+            } else { items = "{\"source\":\"index\",\"results\":[]}" }
+        } else { items = "{\"source\":\"index\",\"results\":[]}" }
+    } else { items = "{\"source\":\"index\",\"results\":" + items + "}" }
     let _audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
     if has(_audit) { pg_liberer(unwrap_or(_audit,ptr_null())) }
     pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
