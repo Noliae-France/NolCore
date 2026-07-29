@@ -306,13 +306,18 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
     let q = requete_query(req, "q")
     if not has(q) or len(unwrap_or(q, "")) < 2 { return erreur_json(422, "Unprocessable Content", "q doit contenir au moins 2 caractères.", req) }
+    var page = unwrap_or(parse_int(unwrap_or(requete_query(req,"page"),"1")),1)
+    var limit = unwrap_or(parse_int(unwrap_or(requete_query(req,"limit"),"20")),20)
+    if page < 1 { page = 1 }; if page > 100 { page = 100 }
+    if limit < 1 { limit = 1 }; if limit > 50 { limit = 50 }
+    let offset = (page - 1) * limit
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
     let cle_rate = unwrap_or(requete_entete(req, "X-Forwarded-For"), "anonymous")
     let rate = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT count(*) FROM audit_logs WHERE action='search' AND metadata->>'key'=$1 AND created_at > now() - interval '1 minute'", [cle_rate])
     if has(rate) and unwrap_or(parse_int(unwrap_or(pg_valeur(unwrap_or(rate,ptr_null()),0,0),"0")),0) >= 60 { pg_liberer(unwrap_or(rate,ptr_null())); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(429,"Too Many Requests","Limite de recherche atteinte, réessayez dans une minute.",req) }
     if has(rate) { pg_liberer(unwrap_or(rate,ptr_null())) }
-    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,title,content FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank(search_vector, plainto_tsquery('french',$2)) DESC LIMIT 30", [unwrap_or(id, ""), unwrap_or(q, "")])
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,title,content FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank(search_vector, plainto_tsquery('french',$2)) DESC LIMIT $3 OFFSET $4", [unwrap_or(id, ""), unwrap_or(q, ""),text(limit),text(offset)])
     if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
     let sortie = unwrap_or(res, ptr_null())
     var items = "["
@@ -326,7 +331,7 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     // Sans document privé, consulter l'index public construit par le crawler.
     if pg_lignes(sortie) == 0 {
         pg_liberer(sortie)
-        let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,content,'crawler' AS source FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank(search_vector,plainto_tsquery('french',$1)) DESC, crawled_at DESC LIMIT 30", [unwrap_or(q, "")])
+        let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,content,'crawler' AS source FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank(search_vector,plainto_tsquery('french',$1)) DESC, crawled_at DESC LIMIT $2 OFFSET $3", [unwrap_or(q, ""),text(limit),text(offset)])
         if not has(public_res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
         let public_sortie = unwrap_or(public_res, ptr_null())
         items = "["
@@ -342,7 +347,7 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
         if pg_lignes(public_sortie) == 0 {
             let brave_token = unwrap_or(env("NOLCORE_BRAVE_SEARCH_TOKEN"), "")
             if brave_token != "" {
-            let brave = http_get_token("https://api.search.brave.com/res/v1/web/search?q=" + url_query_brave(unwrap_or(q,"")) + "&count=10&country=FR&search_lang=fr", "X-Subscription-Token " + brave_token)
+            let brave = http_get_token("https://api.search.brave.com/res/v1/web/search?q=" + url_query_brave(unwrap_or(q,"")) + "&count=" + text(limit) + "&offset=" + text(offset) + "&country=FR&search_lang=fr", "X-Subscription-Token " + brave_token)
             if has(brave) and unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 {
                 let corps_brave = unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"{}" }).corps
                 planifier_crawl_brave(unwrap_or(conn, ptr_null()), corps_brave)
@@ -562,6 +567,19 @@ fn api_search_text(req: Requete, params: Map<Text>) -> WebResultat {
     return api_search(copie, params)
 }
 
+fn api_search_image(req: Requete, params: Map<Text>) -> WebResultat {
+    if not has(utilisateur(req,unwrap_or(env("NOLIAE_SESSION_SECRET"),""))) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let keyword = parametre(params,"keyword")
+    if len(keyword) < 2 { return erreur_json(422,"Unprocessable Content","keyword doit contenir au moins 2 caractères.",req) }
+    let token = unwrap_or(env("NOLCORE_BRAVE_SEARCH_TOKEN"),"")
+    if token == "" { return erreur_json(503,"Service Unavailable","Recherche image non configurée.",req) }
+    let page = unwrap_or(parse_int(unwrap_or(requete_query(req,"page"),"1")),1)
+    let offset = (page - 1) * 20
+    let images = http_get_token("https://api.search.brave.com/res/v1/images/search?q=" + url_query_brave(keyword) + "&count=20&offset=" + text(offset),"X-Subscription-Token " + token)
+    if not has(images) or unwrap_or(images,ReponseHttp {statut:0,entetes:"",corps:""}).statut >= 300 { return erreur_json(502,"Bad Gateway","Recherche image indisponible.",req) }
+    return WebResultat.WebOk(reponse_json(unwrap_or(json_chemin(unwrap_or(images,ReponseHttp {statut:0,entetes:"",corps:"{}"}).corps,"results"),"[]")))
+}
+
 fn api_search_ia(req: Requete, params: Map<Text>) -> WebResultat {
     let keyword = parametre(params, "keyword")
     if keyword == "" { return erreur_json(422,"Unprocessable Content","keyword obligatoire.",req) }
@@ -747,7 +765,7 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "POST", "/v1/ia/:nameid/:modelia/:text", api_ia_modele)
     route_type(methodes, patrons, handlers, "GET", "/v1/ia/models", api_ia_modeles)
     route_type(methodes, patrons, handlers, "GET", "/v1/search/text/:keyword", api_search_text)
-    route_type(methodes, patrons, handlers, "GET", "/v1/search/img/:keyword", api_search_text)
+    route_type(methodes, patrons, handlers, "GET", "/v1/search/img/:keyword", api_search_image)
     route_type(methodes, patrons, handlers, "GET", "/v1/search/ia/:keyword", api_search_ia)
     route_type(methodes, patrons, handlers, "POST", "/v1/crawler/visite/:url", api_crawler_visite)
     route_type(methodes, patrons, handlers, "GET", "/v1/crawler/result/:url", api_crawler_result)
