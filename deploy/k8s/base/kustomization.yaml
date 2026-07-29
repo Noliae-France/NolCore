@@ -5,6 +5,7 @@ resources:
   - namespace.yaml
   - postgres.yaml
   - api.yaml
+  - services.yaml
   - ingress.yaml
 configMapGenerator:
   - name: nolcore-schema
