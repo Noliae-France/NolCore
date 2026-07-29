@@ -19,6 +19,16 @@ NolCore est le socle partagé des applications Noliae. Il regroupe dans un seul
 service natif les briques qui doivent rester cohérentes partout : sécurité,
 comptes, permissions, IA, moteur de recherche, crawler et administration.
 
+Les services sont publiés séparément pour faciliter les déploiements
+microservices :
+
+- [NolCore-API](https://github.com/Noliae-France/NolCore-API) — gateway API,
+  utilisateurs, auth, permissions et administration ;
+- [NolCore-Crawler](https://github.com/Noliae-France/NolCore-Crawler) — crawler
+  respectueux de `robots.txt` ;
+- [NolCore-IA](https://github.com/Noliae-France/NolCore-IA) — agrégateur Claude,
+  ChatGPT, Mistral et Gemini.
+
 Nous avons décidé de montrer le code source de nos apps et de notre cœur :
 la transparence permet aux utilisateurs, développeurs et auditeurs de comprendre
 les garanties du produit, de proposer des améliorations et de construire avec
