@@ -296,7 +296,7 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     let rate = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT count(*) FROM audit_logs WHERE action='search' AND metadata->>'key'=$1 AND created_at > now() - interval '1 minute'", [cle_rate])
     if has(rate) and unwrap_or(parse_int(unwrap_or(pg_valeur(unwrap_or(rate,ptr_null()),0,0),"0")),0) >= 60 { pg_liberer(unwrap_or(rate,ptr_null())); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(429,"Too Many Requests","Limite de recherche atteinte, réessayez dans une minute.",req) }
     if has(rate) { pg_liberer(unwrap_or(rate,ptr_null())) }
-    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT '' AS url,title,content,'private' AS source FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) UNION ALL SELECT url,title,content,'crawler' AS source FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$3) LIMIT 30", [unwrap_or(id, ""), unwrap_or(q, ""), unwrap_or(q, "")])
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT '' AS url,title,content,'private' AS source FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) LIMIT 30", [unwrap_or(id, ""), unwrap_or(q, "")])
     if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
     let sortie = unwrap_or(res, ptr_null())
     var items = "["
@@ -307,18 +307,37 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
         i = i + 1
     }
     items = items + "]"
-    // Premier passage : Brave répond tout de suite et ses URL sont mises en
-    // file. Les passages suivants trouvent l'index local du crawler.
+    // Sans document privé, consulter l'index public construit par le crawler.
     if pg_lignes(sortie) == 0 {
-        let brave_token = unwrap_or(env("NOLCORE_BRAVE_SEARCH_TOKEN"), "")
-        if brave_token != "" {
+        pg_liberer(sortie)
+        let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,content,'crawler' AS source FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY crawled_at DESC LIMIT 30", [unwrap_or(q, "")])
+        if not has(public_res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
+        let public_sortie = unwrap_or(public_res, ptr_null())
+        items = "["
+        i = 0
+        while i < pg_lignes(public_sortie) {
+            if i > 0 { items = items + "," }
+            items = items + "{\"url\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 0), "")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 1), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 2), "")) + ",\"source\":\"crawler\"}"
+            i = i + 1
+        }
+        items = items + "]"
+        // Premier passage : Brave répond tout de suite et ses URL sont mises
+        // en file. Les passages suivants trouvent l'index local du crawler.
+        if pg_lignes(public_sortie) == 0 {
+            let brave_token = unwrap_or(env("NOLCORE_BRAVE_SEARCH_TOKEN"), "")
+            if brave_token != "" {
             let brave = http_get_token("https://api.search.brave.com/res/v1/web/search?q=" + url_query_brave(unwrap_or(q,"")) + "&count=10&country=FR&search_lang=fr", "X-Subscription-Token " + brave_token)
             if has(brave) and unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 {
                 let corps_brave = unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"{}" }).corps
                 planifier_crawl_brave(unwrap_or(conn, ptr_null()), corps_brave)
                 items = unwrap_or(json_chemin(corps_brave, "web.results"), "[]")
             } else { items = "[]" }
-        } else { items = "[]" }
+            } else { items = "[]" }
+        }
+        let _public_audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','public_search_documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
+        if has(_public_audit) { pg_liberer(unwrap_or(_public_audit,ptr_null())) }
+        pg_liberer(public_sortie); pg_fermer(unwrap_or(conn, ptr_null()))
+        return WebResultat.WebOk(reponse_json(items))
     }
     let _audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
     if has(_audit) { pg_liberer(unwrap_or(_audit,ptr_null())) }
