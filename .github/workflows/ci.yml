@@ -40,11 +40,13 @@ jobs:
             -e NOLCORE_PUBLIC_URL=http://127.0.0.1:8080 \
             -v /tmp/nolcore-smtp-certs:/certs:ro \
             -e NOLCORE_DATABASE_URL=postgres://nolcore:ci_password@nolcore-db:5432/nolcore nolcore:ci
-          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/api/health && break || sleep 1; done
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/api/health >/dev/null 2>&1 && break || sleep 1; done
+          curl -fsS http://127.0.0.1:8080/api/health | jq -e '.status == "ok"'
           curl -fsS -X POST http://127.0.0.1:8080/v1/user/register \
             -H 'Content-Type: application/json' \
             -d '{"email":"ci@example.test","name":"CI User","password":"ci-password-123"}' > /tmp/register.json
-          for i in $(seq 1 20); do VERIFY_TOKEN=$(docker exec nolcore-postfix sh -c "grep -Rho 'token=[0-9a-f]*' /home/ci/Maildir/new /home/ci/Maildir/cur 2>/dev/null | head -1 | cut -d= -f2") && test -n "$VERIFY_TOKEN" && break || sleep 1; done
+          for i in $(seq 1 20); do VERIFY_TOKEN=$(docker exec nolcore-postfix sh -c "grep -Rho 'token=[0-9a-f]*' /home/ci/Maildir/new /home/ci/Maildir/cur /var/mail/ci 2>/dev/null | head -1 | cut -d= -f2") && test -n "$VERIFY_TOKEN" && break || sleep 1; done
+          test -n "$VERIFY_TOKEN" || { cat /tmp/register.json; docker exec nolcore-postfix find /home/ci/Maildir /var/mail -maxdepth 2 -type f -print; exit 1; }
           test -n "$VERIFY_TOKEN"
           curl -fsS "http://127.0.0.1:8080/v1/user/verify?token=$VERIFY_TOKEN" | jq -e '.verified == true'
           curl -fsS -X POST http://127.0.0.1:8080/v1/user/login \
