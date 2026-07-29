@@ -21,7 +21,7 @@ jobs:
             -v "$PWD/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro" postgres:16-alpine
           mkdir -p /tmp/nolcore-smtp-certs
           docker build -t nolcore-postfix:ci tests/postfix
-          docker run -d --rm --name nolcore-postfix --network nolcore-ci \
+          docker run -d --rm --name nolcore-postfix --network nolcore-ci --network-alias smtp-test \
             -v /tmp/nolcore-smtp-certs:/certs nolcore-postfix:ci
           for i in $(seq 1 30); do test -f /tmp/nolcore-smtp-certs/ca.crt && break || sleep 1; done
           sleep 5
