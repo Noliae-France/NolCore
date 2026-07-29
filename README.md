@@ -146,6 +146,10 @@ POST /v1/discord/webhook
 Configuration Discord : `NOLCORE_DISCORD_BOT_TOKEN`,
 `NOLCORE_DISCORD_GUILD_ID` et `NOLCORE_DISCORD_WEBHOOK_URL`.
 
+Les profils SMTP utilisent SMTPS avec validation TLS sur le port `465`.
+Le mot de passe reste dans l’environnement indiqué par `secret_env` ; il n’est
+jamais stocké dans PostgreSQL.
+
 ## Développement
 
 Le workflow GitHub Actions compile l’image Docker avec le binaire Nolc public,

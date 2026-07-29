@@ -1,4 +1,5 @@
 import "../nolc/lib/crypto.nol"
+import "../nolc/lib/tls.nol"
 
 fn smtp_ok(reponse: Text) -> Bool {
     if len(reponse) < 3 { return false }
@@ -12,19 +13,29 @@ fn smtp_commande(fd: Int, commande: Text) -> Bool {
 }
 
 fn smtp_envoyer(host: Text, port: Int, username: Text, password: Text, expediteur: Text, destinataire: Text, sujet: Text, corps: Text) -> Bool {
+    // SMTP en clair est refusé. Le profil doit utiliser SMTPS implicite sur 465.
+    if port != 465 { return false }
     let connexion = tcp_connect(host, port)
     if not has(connexion) { return false }
     let fd = unwrap_or(connexion,-1)
-    if not smtp_ok(unwrap_or(tcp_read(fd),"")) { tcp_close(fd); return false }
-    if not smtp_commande(fd,"EHLO nolcore") { tcp_close(fd); return false }
+    let contexte = tls_client_contexte()
+    if not has(contexte) { tcp_close(fd); return false }
+    let ctx = unwrap_or(contexte,ptr_null())
+    let session = tls_connecter(ctx,fd,host)
+    if not has(session) { tls_liberer_contexte(ctx); tcp_close(fd); return false }
+    let ssl = unwrap_or(session,ptr_null())
+    if not smtp_ok(tls_client_lire(ssl)) { tls_fermer(ssl); tls_liberer_contexte(ctx); tcp_close(fd); return false }
+    if tls_ecrire(ssl,"EHLO nolcore\r\n") <= 0 or not smtp_ok(tls_client_lire(ssl)) { tls_fermer(ssl); tls_liberer_contexte(ctx); tcp_close(fd); return false }
     if username != "" {
-        if not smtp_commande(fd,"AUTH LOGIN") or not smtp_commande(fd,base64_encode(bytes_from_text(username))) or not smtp_commande(fd,base64_encode(bytes_from_text(password))) { tcp_close(fd); return false }
+        if tls_ecrire(ssl,"AUTH LOGIN\r\n") <= 0 or not smtp_ok(tls_client_lire(ssl)) or tls_ecrire(ssl,base64_encode(bytes_from_text(username)) + "\r\n") <= 0 or not smtp_ok(tls_client_lire(ssl)) or tls_ecrire(ssl,base64_encode(bytes_from_text(password)) + "\r\n") <= 0 or not smtp_ok(tls_client_lire(ssl)) { tls_fermer(ssl); tls_liberer_contexte(ctx); tcp_close(fd); return false }
     }
-    if not smtp_commande(fd,"MAIL FROM:<" + expediteur + ">") or not smtp_commande(fd,"RCPT TO:<" + destinataire + ">") { tcp_close(fd); return false }
-    if not tcp_write(fd,"DATA\r\n") or not smtp_ok(unwrap_or(tcp_read(fd),"")) { tcp_close(fd); return false }
+    if tls_ecrire(ssl,"MAIL FROM:<" + expediteur + ">\r\n") <= 0 or not smtp_ok(tls_client_lire(ssl)) or tls_ecrire(ssl,"RCPT TO:<" + destinataire + ">\r\n") <= 0 or not smtp_ok(tls_client_lire(ssl)) { tls_fermer(ssl); tls_liberer_contexte(ctx); tcp_close(fd); return false }
+    if tls_ecrire(ssl,"DATA\r\n") <= 0 or not smtp_ok(tls_client_lire(ssl)) { tls_fermer(ssl); tls_liberer_contexte(ctx); tcp_close(fd); return false }
     let message = "From: " + expediteur + "\r\nTo: " + destinataire + "\r\nSubject: " + sujet + "\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + corps
-    if not tcp_write(fd,message + "\r\n.\r\n") or not smtp_ok(unwrap_or(tcp_read(fd),"")) { tcp_close(fd); return false }
-    let _quit = smtp_commande(fd,"QUIT")
+    if tls_ecrire(ssl,message + "\r\n.\r\n") <= 0 or not smtp_ok(tls_client_lire(ssl)) { tls_fermer(ssl); tls_liberer_contexte(ctx); tcp_close(fd); return false }
+    let _quit = tls_ecrire(ssl,"QUIT\r\n")
+    tls_fermer(ssl)
+    tls_liberer_contexte(ctx)
     tcp_close(fd)
     return true
 }
