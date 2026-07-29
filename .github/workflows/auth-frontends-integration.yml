@@ -1,0 +1,23 @@
+name: NolCore auth frontends integration
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo: [Noliae-Register, Noliae-Login, Noliae-Account]
+    steps:
+      - name: Checkout frontend
+        run: git clone --depth 1 https://github.com/Noliae-France/${{ matrix.repo }}.git app
+      - name: Build Nolc frontend
+        run: docker build -t ${{ matrix.repo }} ./app
+      - name: Verify health endpoint
+        run: |
+          docker run -d --name app -p 8090:8080 ${{ matrix.repo }}
+          for i in $(seq 1 20); do curl -fsS http://localhost:8090/api/health && break || sleep 1; done
+          docker rm -f app
