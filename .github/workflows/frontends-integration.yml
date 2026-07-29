@@ -1,0 +1,31 @@
+name: NolCore frontend integration
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout public frontends
+        run: |
+          git clone --depth 1 https://github.com/Noliae-France/Noliae-Search.git /tmp/noliae-search
+          git clone --depth 1 https://github.com/Noliae-France/Noliae-IA.git /tmp/noliae-ia
+      - name: Build frontend images
+        run: |
+          docker build -t nolcore-search /tmp/noliae-search
+          docker build -t nolcore-ia-front /tmp/noliae-ia
+      - name: Verify Nolc MVC frontends
+        run: |
+          docker network create nolcore-frontends
+          docker run -d --name search --network nolcore-frontends -p 8081:8080 nolcore-search
+          docker run -d --name ia-front --network nolcore-frontends -p 8082:8080 nolcore-ia-front
+          for i in $(seq 1 20); do curl -fsS http://localhost:8081/ && curl -fsS http://localhost:8082/ && break || sleep 1; done
+          curl -fsS 'http://localhost:8081/recherche?q=Noliae' | grep -q 'Noliae Search'
+          curl -fsS http://localhost:8081/api/health | grep -q 'nolc'
+          curl -fsS http://localhost:8082/api/health | grep -q 'nolc'
+          docker rm -f search ia-front
+          docker network rm nolcore-frontends
