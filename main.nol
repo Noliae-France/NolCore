@@ -228,25 +228,38 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     if not has(message) { return erreur_json(422, "Unprocessable Content", "message est obligatoire.", req) }
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
-    var titre = unwrap_or(message, "")
-    if len(titre) > 80 { titre = sub(titre, 0, 80) }
-    let conversation = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO conversations(user_id,title) VALUES($1,$2) RETURNING id", [unwrap_or(id,""), titre])
-    if not has(conversation) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Création de conversation impossible.",req) }
-    let conv = unwrap_or(conversation, ptr_null())
-    let conv_id = unwrap_or(pg_valeur(conv,0,0),"")
-    pg_liberer(conv)
+    let fournisseur = unwrap_or(json_texte_champ(unwrap_or(corps,""),"provider"),unwrap_or(env("NOLCORE_DEFAULT_PROVIDER"), "chatgpt"))
+    let modele = unwrap_or(json_texte_champ(unwrap_or(corps,""),"model"),unwrap_or(env("NOLCORE_DEFAULT_MODEL"), "gpt-4o-mini"))
+    let quota = unwrap_or(parse_int(unwrap_or(env("NOLCORE_AI_HOURLY_LIMIT"),"40")),40)
+    let usage = pg_requete_params(unwrap_or(conn,ptr_null()),"SELECT count(*) FROM ai_usage WHERE user_id=$1 AND created_at > now()-interval '1 hour'",[unwrap_or(id,"")])
+    if has(usage) and unwrap_or(parse_int(unwrap_or(pg_valeur(unwrap_or(usage,ptr_null()),0,0),"0")),0) >= quota { pg_liberer(unwrap_or(usage,ptr_null())); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(429,"Too Many Requests","Quota IA horaire atteint.",req) }
+    if has(usage) { pg_liberer(unwrap_or(usage,ptr_null())) }
+    var conv_id = unwrap_or(json_texte_champ(unwrap_or(corps,""),"conversation_id"),"")
+    if conv_id == "" {
+        var titre = unwrap_or(message, ""); if len(titre) > 80 { titre = sub(titre, 0, 80) }
+        let conversation = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO conversations(user_id,title,provider,model) VALUES($1,$2,$3,$4) RETURNING id", [unwrap_or(id,""), titre,fournisseur,modele])
+        if not has(conversation) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Création de conversation impossible.",req) }
+        let conv = unwrap_or(conversation, ptr_null()); conv_id = unwrap_or(pg_valeur(conv,0,0),""); pg_liberer(conv)
+    } else {
+        let owned = pg_requete_params(unwrap_or(conn,ptr_null()),"SELECT id FROM conversations WHERE id=$1 AND user_id=$2",[conv_id,unwrap_or(id,"")])
+        if not has(owned) or pg_lignes(unwrap_or(owned,ptr_null())) != 1 { if has(owned) { pg_liberer(unwrap_or(owned,ptr_null())) }; pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(404,"Not Found","Conversation introuvable.",req) }
+        pg_liberer(unwrap_or(owned,ptr_null()))
+    }
     let saved = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO messages(conversation_id,role,content) VALUES($1,'user',$2)", [conv_id, unwrap_or(message,"")])
     if has(saved) { pg_liberer(unwrap_or(saved,ptr_null())) }
-    let fournisseur = unwrap_or(env("NOLCORE_DEFAULT_PROVIDER"), "chatgpt")
-    let modele = unwrap_or(env("NOLCORE_DEFAULT_MODEL"), "gpt-4o-mini")
+    let rag = pg_requete_params(unwrap_or(conn,ptr_null()),"SELECT title,content FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank(search_vector,plainto_tsquery('french',$2)) DESC LIMIT 3",[unwrap_or(id,""),unwrap_or(message,"")])
+    var contexte = ""
+    if has(rag) { let sources = unwrap_or(rag,ptr_null()); var ri=0; while ri < pg_lignes(sources) { contexte += "\n[" + unwrap_or(pg_valeur(sources,ri,0),"") + "] " + sub(unwrap_or(pg_valeur(sources,ri,1),""),0,1200); ri=ri+1 }; pg_liberer(sources) }
     let service_url = unwrap_or(env("NOLCORE_IA_URL"), "")
     if service_url == "" { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(503,"Service Unavailable","Service IA non configuré.",req) }
-    let body = "{\"provider\":" + json_texte(fournisseur) + ",\"model\":" + json_texte(modele) + ",\"text\":" + json_texte(unwrap_or(message,"")) + "}"
+    let body = "{\"provider\":" + json_texte(fournisseur) + ",\"model\":" + json_texte(modele) + ",\"text\":" + json_texte(unwrap_or(message,"") + contexte) + "}"
     let ia = http_post(service_url + "/v1/ia", "application/json", body)
     if not has(ia) or unwrap_or(ia,ReponseHttp { statut:0, entetes:"", corps:"" }).statut >= 300 { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(502,"Bad Gateway","Service IA indisponible.",req) }
     let answer = unwrap_or(ia,ReponseHttp { statut:0, entetes:"", corps:"" }).corps
     let saved_answer = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO messages(conversation_id,role,content) VALUES($1,'assistant',$2)", [conv_id, answer])
     if has(saved_answer) { pg_liberer(unwrap_or(saved_answer,ptr_null())) }
+    let cost = pg_requete_params(unwrap_or(conn,ptr_null()),"INSERT INTO ai_usage(user_id,conversation_id,provider,model,input_chars,output_chars) VALUES($1,$2,$3,$4,$5,$6)",[unwrap_or(id,""),conv_id,fournisseur,modele,text(len(unwrap_or(message,""))),text(len(answer))])
+    if has(cost) { pg_liberer(unwrap_or(cost,ptr_null())) }
     pg_fermer(unwrap_or(conn, ptr_null()))
     return WebResultat.WebOk(reponse_json("{\"conversation_id\":" + json_texte(conv_id) + ",\"answer\":" + json_texte(answer) + "}"))
 }
