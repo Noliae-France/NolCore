@@ -12,4 +12,6 @@ CREATE INDEX IF NOT EXISTS user_sessions_lookup_idx ON user_sessions(token_hash,
 CREATE TABLE IF NOT EXISTS email_verification_tokens (token_hash TEXT PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ);
 CREATE TABLE IF NOT EXISTS smtp_profiles (id TEXT PRIMARY KEY, host TEXT NOT NULL, port INT NOT NULL DEFAULT 587, username TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT true, secret_env TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS smtp_outbox (id BIGSERIAL PRIMARY KEY, smtp_id TEXT REFERENCES smtp_profiles(id) ON DELETE CASCADE, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS instance_branding (id BOOLEAN PRIMARY KEY DEFAULT true CHECK (id), name TEXT NOT NULL, logo_url TEXT NOT NULL DEFAULT '', website_url TEXT NOT NULL DEFAULT '');
+INSERT INTO instance_branding(id,name) VALUES (true,'NolCore') ON CONFLICT (id) DO NOTHING;
 INSERT INTO permissions(code,description) VALUES ('users.read','Lire les utilisateurs'),('users.manage','Gérer les utilisateurs'),('admin.read','Accéder à l’administration'),('documents.write','Créer des documents'),('ai.use','Utiliser l’interface IA') ON CONFLICT DO NOTHING;

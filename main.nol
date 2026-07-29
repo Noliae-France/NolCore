@@ -29,6 +29,41 @@ fn champ_entree(req: Requete, nom: Text) -> Option<Text> {
     return requete_form(req, nom)
 }
 
+// CORS n'est jamais ouvert à "*" : les applications déployées sont déclarées
+// dans NOLCORE_ALLOWED_ORIGINS, séparées par des virgules. Cela permet de
+// changer de domaine sans modifier ni recompiler le Core.
+fn middleware_cors_configurable(req: Requete, rep: Reponse) -> Reponse {
+    let origine = requete_entete(req, "Origin")
+    if not has(origine) { return rep }
+    let recu = unwrap_or(origine, "")
+    for candidate in split(unwrap_or(env("NOLCORE_ALLOWED_ORIGINS"), ""), ",") {
+        if trim(candidate) == recu and recu != "" {
+            var out = reponse_cors(rep, recu, "GET, POST, OPTIONS", "Content-Type, Authorization, X-CSRF-Token")
+            out = reponse_avec_entete(out, "Access-Control-Allow-Credentials", "true")
+            return out
+        }
+    }
+    return rep
+}
+
+// tcp_read peut retourner une requête HTTP fragmentée. Attendre jusqu'à ce que
+// le parseur HTTP dispose de tous les octets évite les faux 408 sur POST.
+fn lire_requete_http_complete(fd: Int, limites: WebLimites) -> Text {
+    var buf = ""
+    while true {
+        let morceau = tcp_read(fd)
+        if not has(morceau) { return buf }
+        buf += unwrap_or(morceau, "")
+        if len(buf) > limites.max_entetes + limites.max_corps + 8192 { return buf }
+        match http_analyser(buf, limites.max_entetes, limites.max_corps) {
+            Complet(_req) => return buf
+            Erreur(_code) => return buf
+            Incomplet => {}
+        }
+    }
+    return buf
+}
+
 fn utilisateur(req: Requete, secret: Text) -> Option<Text> {
     let token = requete_bearer(req)
     if has(token) {
@@ -86,6 +121,23 @@ fn api_pret(_req: Requete, _params: Map<Text>) -> WebResultat {
 
 fn api_capacites(_req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json("{\"modules\":[\"users\",\"auth\",\"ia\",\"recherche\",\"postgresql\",\"permissions\",\"administration\"]}"))
+}
+
+// Identité publique, lue depuis PostgreSQL. Le Core reste volontairement
+// neutre : "NolCore" est le seul repli lorsqu'une base est indisponible.
+fn api_branding(_req: Requete, _params: Map<Text>) -> WebResultat {
+    let conn = db()
+    if not has(conn) { return WebResultat.WebOk(reponse_json("{\"name\":\"NolCore\",\"logo_url\":\"\",\"website_url\":\"\"}")) }
+    let res = pg_requete(unwrap_or(conn,ptr_null()), "SELECT name,logo_url,website_url FROM instance_branding WHERE id=true LIMIT 1")
+    if not has(res) or pg_lignes(unwrap_or(res,ptr_null())) != 1 {
+        if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }
+        pg_fermer(unwrap_or(conn,ptr_null()))
+        return WebResultat.WebOk(reponse_json("{\"name\":\"NolCore\",\"logo_url\":\"\",\"website_url\":\"\"}"))
+    }
+    let lignes = unwrap_or(res,ptr_null())
+    let payload = "{\"name\":" + json_texte(unwrap_or(pg_valeur(lignes,0,0),"NolCore")) + ",\"logo_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,1),"")) + ",\"website_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,2),"")) + "}"
+    pg_liberer(lignes); pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json(payload))
 }
 
 fn api_register(req: Requete, _params: Map<Text>) -> WebResultat {
@@ -527,6 +579,7 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "GET", "/api/dependencies", api_dependances)
     route_type(methodes, patrons, handlers, "GET", "/api/ready", api_pret)
     route_type(methodes, patrons, handlers, "GET", "/api/capacites", api_capacites)
+    route_type(methodes, patrons, handlers, "GET", "/v1/branding", api_branding)
     route_type(methodes, patrons, handlers, "POST", "/api/auth/register", api_register)
     route_type(methodes, patrons, handlers, "POST", "/api/auth/login", api_login)
     route_type(methodes, patrons, handlers, "POST", "/api/chat", api_chat)
@@ -580,6 +633,7 @@ fn main() {
     var post: List<Fn(Requete, Reponse) -> Reponse> = []
     push(post, middleware_securite)
     push(post, middleware_request_id)
+    push(post, middleware_cors_configurable)
     print("NolCore sur http://0.0.0.0:" + text(port))
     let ecoute = tcp_listen(port)
     if not has(ecoute) { print("port indisponible"); return }
@@ -588,7 +642,7 @@ fn main() {
         let venu = tcp_accept(serveur)
         if has(venu) {
             let client = unwrap_or(venu, -1)
-            let requete = unwrap_or(tcp_read(client), "")
+            let requete = lire_requete_http_complete(client, limites)
             let reponse = web_repondre_resultat_pre(requete, limites, application, pre, post)
             let _ecrit = tcp_write(client, reponse)
             tcp_close(client)
