@@ -379,6 +379,20 @@ fn api_ia_modele(req: Requete, params: Map<Text>) -> WebResultat {
     return erreur_json(503,"Service Unavailable","Service IA non configuré.",req)
 }
 
+// Catalogue exposé à l'interface : seuls les fournisseurs configurés sont
+// proposés. Aucun token ni détail sensible ne quitte le Core.
+fn api_ia_modeles(req: Requete, _params: Map<Text>) -> WebResultat {
+    if not has(utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    var items = ""
+    var sep = ""
+    if unwrap_or(env("NOLCORE_CHATGPT_TOKEN"),"") != "" { items += sep + "{\"provider\":\"chatgpt\",\"model\":\"gpt-4o-mini\",\"label\":\"ChatGPT\"}"; sep = "," }
+    if unwrap_or(env("NOLCORE_CLAUDE_TOKEN"),"") != "" { items += sep + "{\"provider\":\"claude\",\"model\":\"claude-3-5-sonnet-latest\",\"label\":\"Claude\"}"; sep = "," }
+    if unwrap_or(env("NOLCORE_MISTRAL_TOKEN"),"") != "" { items += sep + "{\"provider\":\"mistral\",\"model\":\"mistral-small-latest\",\"label\":\"Mistral\"}"; sep = "," }
+    if unwrap_or(env("NOLCORE_GEMINI_TOKEN"),"") != "" { items += sep + "{\"provider\":\"gemini\",\"model\":\"gemini-1.5-flash\",\"label\":\"Gemini\"}"; sep = "," }
+    if items == "" { items = "{\"provider\":" + json_texte(unwrap_or(env("NOLCORE_DEFAULT_PROVIDER"),"chatgpt")) + ",\"model\":" + json_texte(unwrap_or(env("NOLCORE_DEFAULT_MODEL"),"gpt-4o-mini")) + ",\"label\":\"Modèle par défaut\"}" }
+    return WebResultat.WebOk(reponse_json("[" + items + "]"))
+}
+
 fn api_user_reset(req: Requete, _params: Map<Text>) -> WebResultat {
     if not has(utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
     return api_user_password(req, "reset")
@@ -605,6 +619,7 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "POST", "/v1/user/me/changemail", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_user_field(r, "email") })
     route_type(methodes, patrons, handlers, "POST", "/v1/user/me/changename", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_user_field(r, "name") })
     route_type(methodes, patrons, handlers, "POST", "/v1/ia/:nameid/:modelia/:text", api_ia_modele)
+    route_type(methodes, patrons, handlers, "GET", "/v1/ia/models", api_ia_modeles)
     route_type(methodes, patrons, handlers, "GET", "/v1/search/text/:keyword", api_search_text)
     route_type(methodes, patrons, handlers, "GET", "/v1/search/img/:keyword", api_search_text)
     route_type(methodes, patrons, handlers, "GET", "/v1/search/ia/:keyword", api_search_ia)
