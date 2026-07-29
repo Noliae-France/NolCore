@@ -1,8 +1,8 @@
-import "../Noliae Lang/lib/web_serveur.nol"
-import "../Noliae Lang/lib/pg.nol"
-import "../Noliae Lang/lib/json.nol"
-import "../Noliae Lang/lib/sodium.nol"
-import "../Noliae Lang/lib/temps.nol"
+import "../nolc/lib/web_serveur.nol"
+import "../nolc/lib/pg.nol"
+import "../nolc/lib/json.nol"
+import "../nolc/lib/sodium.nol"
+import "../nolc/lib/temps.nol"
 import "accueil.nol"
 
 fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
