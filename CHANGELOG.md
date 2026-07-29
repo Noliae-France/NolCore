@@ -5,6 +5,10 @@
 - Documentation sécurité, contribution et déploiement communautaire.
 - Compatibilité Kubernetes/K3s via Kustomize.
 - Vérification de compte par e-mail avec Postfix/Dovecot dans la CI.
+- Réinitialisation de mot de passe testée de bout en bout dans la CI.
+- Sessions cookie et bearer enregistrées dans PostgreSQL, révocables après
+  changement/reset de mot de passe et gérables par appareil.
+- Image Docker corrigée pour les imports relatifs de la bibliothèque Nolc.
 
 ## [0.1.0] - 2026-07-29
 

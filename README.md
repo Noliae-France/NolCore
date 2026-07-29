@@ -39,8 +39,9 @@ sécurité et de fonctionnement de Noliae restent auditables.
 
 ## Fonctionnalités
 
-- Authentification : inscription, vérification e-mail, connexion, sessions
-  signées de 24 h, profil et changement d’identifiants.
+- Authentification : inscription, vérification e-mail, connexion, reset de
+  mot de passe, sessions signées de 24 h et révocables, profil et changement
+  d’identifiants.
 - PostgreSQL : requêtes paramétrées, recherche plein texte, conversations,
   documents, permissions, audit et profils SMTP.
 - IA : routes protégées qui délèguent au service interne `NOLCORE_IA_URL`.
@@ -99,14 +100,17 @@ destinés au service IA, jamais au dépôt ni à l’image du gateway.
 | Groupe | Routes |
 |---|---|
 | Santé | `GET /api/health`, `GET /api/ready`, `GET /api/dependencies` |
-| Users | `POST /v1/user/register`, `/login`, `GET /me`, vérification et modifications du compte |
+| Users | `POST /v1/user/register`, `/login`, `/resetpassword`, `GET /me`, vérification et modifications du compte |
+| Appareils | `GET /v1/user/me/sessions`, `DELETE /v1/user/me/sessions/:session_id`, `POST /v1/user/me/sessions/revoke-all` |
 | IA | `POST /v1/ia`, `POST /v1/ia/:nameid/:modelia/:text` |
 | Recherche | `GET /v1/search/text/:keyword`, `/img/:keyword`, `/ia/:keyword` |
 | Crawler | `POST /v1/crawler/visite/:url`, `GET /v1/crawler/result/:url` |
 | Admin | `/v1/admin/user/`, `/ia/`, `/smtp/`, `/crawler/`, `/discord/` |
 | SMTP | `POST /v1/smtp/:idsmtp/send`, `GET /pool`, `DELETE /remove` |
 
-Les routes sensibles exigent une session Bearer/cookie valide. Les ports SMTP
+Les routes sensibles exigent une session Bearer/cookie valide. Les bearer
+tokens et cookies sont tous deux enregistrés et révocables dans PostgreSQL ;
+un changement ou reset de mot de passe déconnecte les appareils. Les ports SMTP
 autorisés sont exclusivement 465 (SMTPS) et 587 (STARTTLS).
 
 ## Kubernetes / K3s
