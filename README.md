@@ -29,6 +29,10 @@ microservices :
 - [NolCore-IA](https://github.com/Noliae-France/NolCore-IA) — agrégateur Claude,
   ChatGPT, Mistral et Gemini.
 
+Le gateway délègue aux services via `NOLCORE_CRAWLER_URL` et
+`NOLCORE_IA_URL`. Compose les configure vers `crawler:8091` et `ia:8092` ; en
+Kubernetes, utilisez les noms DNS des Services internes.
+
 Nous avons décidé de montrer le code source de nos apps et de notre cœur :
 la transparence permet aux utilisateurs, développeurs et auditeurs de comprendre
 les garanties du produit, de proposer des améliorations et de construire avec
