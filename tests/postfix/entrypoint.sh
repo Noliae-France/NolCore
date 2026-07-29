@@ -43,9 +43,11 @@ printf '%s\n' \
   'ssl = no' \
   'disable_plaintext_auth = no' \
   'auth_mechanisms = plain login' \
-  'userdb passwd {' \
+  'userdb {' \
+  '  driver = passwd' \
   '}' \
-  'passdb pam {' \
+  'passdb {' \
+  '  driver = pam' \
   '}' \
   'service auth {' \
   '  unix_listener auth-userdb {' \
