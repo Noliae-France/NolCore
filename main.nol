@@ -310,14 +310,14 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     // Sans document privé, consulter l'index public construit par le crawler.
     if pg_lignes(sortie) == 0 {
         pg_liberer(sortie)
-        let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,content,'crawler' AS source FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY crawled_at DESC LIMIT 30", [unwrap_or(q, "")])
+        let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,content,'crawler' AS source FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank(search_vector,plainto_tsquery('french',$1)) DESC, crawled_at DESC LIMIT 30", [unwrap_or(q, "")])
         if not has(public_res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
         let public_sortie = unwrap_or(public_res, ptr_null())
         items = "["
         i = 0
         while i < pg_lignes(public_sortie) {
             if i > 0 { items = items + "," }
-            items = items + "{\"url\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 0), "")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 1), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 2), "")) + ",\"source\":\"crawler\"}"
+            items = items + "{\"url\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 0), "")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 1), "")) + ",\"description\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 2), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 3), "")) + ",\"source\":\"crawler\"}"
             i = i + 1
         }
         items = items + "]"
