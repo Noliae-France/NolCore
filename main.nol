@@ -128,14 +128,14 @@ fn api_capacites(_req: Requete, _params: Map<Text>) -> WebResultat {
 fn api_branding(_req: Requete, _params: Map<Text>) -> WebResultat {
     let conn = db()
     if not has(conn) { return WebResultat.WebOk(reponse_json("{\"name\":\"NolCore\",\"logo_url\":\"\",\"website_url\":\"\"}")) }
-    let res = pg_requete(unwrap_or(conn,ptr_null()), "SELECT name,logo_url,website_url FROM instance_branding WHERE id=true LIMIT 1")
+    let res = pg_requete(unwrap_or(conn,ptr_null()), "SELECT name,logo_url,website_url,search_url,ia_url,login_url,register_url,account_url,api_url FROM instance_branding WHERE id=true LIMIT 1")
     if not has(res) or pg_lignes(unwrap_or(res,ptr_null())) != 1 {
         if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }
         pg_fermer(unwrap_or(conn,ptr_null()))
         return WebResultat.WebOk(reponse_json("{\"name\":\"NolCore\",\"logo_url\":\"\",\"website_url\":\"\"}"))
     }
     let lignes = unwrap_or(res,ptr_null())
-    let payload = "{\"name\":" + json_texte(unwrap_or(pg_valeur(lignes,0,0),"NolCore")) + ",\"logo_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,1),"")) + ",\"website_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,2),"")) + "}"
+    let payload = "{\"name\":" + json_texte(unwrap_or(pg_valeur(lignes,0,0),"NolCore")) + ",\"logo_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,1),"")) + ",\"website_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,2),"")) + ",\"search_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,3),"")) + ",\"ia_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,4),"")) + ",\"login_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,5),"")) + ",\"register_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,6),"")) + ",\"account_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,7),"")) + ",\"api_url\":" + json_texte(unwrap_or(pg_valeur(lignes,0,8),"")) + "}"
     pg_liberer(lignes); pg_fermer(unwrap_or(conn,ptr_null()))
     return WebResultat.WebOk(reponse_json(payload))
 }
