@@ -15,6 +15,7 @@ jobs:
       - name: Smoke test HTTP server
         run: |
           set -e
+          test "$(sha256sum schema.sql | cut -d' ' -f1)" = "$(sha256sum deploy/k8s/base/schema.sql | cut -d' ' -f1)"
           docker network create nolcore-ci
           docker run -d --rm --name nolcore-db --network nolcore-ci \
             -e POSTGRES_DB=nolcore -e POSTGRES_USER=nolcore -e POSTGRES_PASSWORD=ci_password \

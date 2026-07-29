@@ -8,7 +8,9 @@ WORKDIR /app
 RUN install -m 0755 /tmp/nolc/nolc /usr/local/bin/nolc && for vue in accueil login inscription recherche tableau; do nolc nhtml "$vue.nhtml"; done && nolc build main.nol -o nolcore --lien pq --lien sodium --lien ssl --lien crypto --chemin-lib /usr/lib/x86_64-linux-gnu
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends libpq5 libsodium23 libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN useradd --system --uid 10001 --no-create-home nolcore
 COPY --from=build /app/nolcore /app/nolcore
 WORKDIR /app
+USER 10001:10001
 EXPOSE 8080
 CMD ["/app/nolcore"]

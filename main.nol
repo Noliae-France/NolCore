@@ -67,6 +67,16 @@ fn api_sante(_req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json("{\"status\":\"ok\",\"runtime\":\"nolc\",\"service\":\"nolcore\"}"))
 }
 
+fn api_pret(_req: Requete, _params: Map<Text>) -> WebResultat {
+    let conn = db()
+    if not has(conn) { return erreur_json(503,"Service Unavailable","PostgreSQL indisponible.",_req) }
+    let res = pg_requete(unwrap_or(conn,ptr_null()), "SELECT 1")
+    if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    if not has(res) { return erreur_json(503,"Service Unavailable","PostgreSQL indisponible.",_req) }
+    return WebResultat.WebOk(reponse_json("{\"status\":\"ready\",\"database\":\"ok\"}"))
+}
+
 fn api_capacites(_req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json("{\"modules\":[\"users\",\"auth\",\"ia\",\"recherche\",\"postgresql\",\"permissions\",\"administration\"]}"))
 }
@@ -540,6 +550,7 @@ fn application(req: Requete) -> WebResultat {
     var patrons: List<Text> = []
     var handlers: List<Fn(Requete, Map<Text>) -> WebResultat> = []
     route_type(methodes, patrons, handlers, "GET", "/api/health", api_sante)
+    route_type(methodes, patrons, handlers, "GET", "/api/ready", api_pret)
     route_type(methodes, patrons, handlers, "GET", "/api/capacites", api_capacites)
     route_type(methodes, patrons, handlers, "POST", "/api/auth/register", api_register)
     route_type(methodes, patrons, handlers, "POST", "/api/auth/login", api_login)

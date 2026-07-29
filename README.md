@@ -56,6 +56,31 @@ Le serveur est un binaire natif Nolc. PostgreSQL est le seul service de
 persistance ; les requêtes venant de l’extérieur passent par des paramètres
 libpq et ne sont pas concaténées au SQL.
 
+### Kubernetes / K3s
+
+Le dossier `deploy/k8s/base` fournit un déploiement Kustomize avec deux
+réplicas API, PostgreSQL persistant, probes `/api/health` et `/api/ready`,
+Service et Ingress. L’image `ghcr.io/noliae-france/nolcore:main` est publiée
+par GitHub Actions après chaque push sur `main`.
+
+Créer les secrets hors dépôt, puis déployer :
+
+```sh
+kubectl -n nolcore create secret generic nolcore-secrets \
+  --from-literal=postgres-password='mot-de-passe-fort' \
+  --from-literal=session-secret="$(openssl rand -hex 32)" \
+  --from-literal=NOLCORE_CHATGPT_TOKEN='' \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -k deploy/k8s/base
+kubectl -n nolcore rollout status statefulset/postgres
+kubectl -n nolcore rollout status deployment/nolcore-api
+```
+
+Pour K3s, la même commande fonctionne ; remplacer l’Ingress par la classe
+installée dans le cluster si nécessaire. Les tokens IA, SMTP et Discord sont
+également fournis par `nolcore-secrets` ou par un Secret externe (External
+Secrets/Vault), jamais par un fichier versionné.
+
 ## Démarrage rapide
 
 ```sh
