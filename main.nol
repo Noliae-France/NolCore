@@ -316,10 +316,10 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
             if has(brave) and unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 {
                 let corps_brave = unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"{}" }).corps
                 planifier_crawl_brave(unwrap_or(conn, ptr_null()), corps_brave)
-                items = "{\"source\":\"brave\",\"results\":" + unwrap_or(json_chemin(corps_brave, "web.results"), "[]") + "}"
-            } else { items = "{\"source\":\"index\",\"results\":[]}" }
-        } else { items = "{\"source\":\"index\",\"results\":[]}" }
-    } else { items = "{\"source\":\"index\",\"results\":" + items + "}" }
+                items = unwrap_or(json_chemin(corps_brave, "web.results"), "[]")
+            } else { items = "[]" }
+        } else { items = "[]" }
+    }
     let _audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
     if has(_audit) { pg_liberer(unwrap_or(_audit,ptr_null())) }
     pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
