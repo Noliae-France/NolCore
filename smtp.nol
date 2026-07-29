@@ -1,0 +1,30 @@
+import "../nolc/lib/crypto.nol"
+
+fn smtp_ok(reponse: Text) -> Bool {
+    if len(reponse) < 3 { return false }
+    let code = parse_int(sub(reponse,0,3))
+    return has(code) and unwrap_or(code,0) >= 200 and unwrap_or(code,0) < 400
+}
+
+fn smtp_commande(fd: Int, commande: Text) -> Bool {
+    if not tcp_write(fd, commande + "\r\n") { return false }
+    return smtp_ok(unwrap_or(tcp_read(fd), ""))
+}
+
+fn smtp_envoyer(host: Text, port: Int, username: Text, password: Text, expediteur: Text, destinataire: Text, sujet: Text, corps: Text) -> Bool {
+    let connexion = tcp_connect(host, port)
+    if not has(connexion) { return false }
+    let fd = unwrap_or(connexion,-1)
+    if not smtp_ok(unwrap_or(tcp_read(fd),"")) { tcp_close(fd); return false }
+    if not smtp_commande(fd,"EHLO nolcore") { tcp_close(fd); return false }
+    if username != "" {
+        if not smtp_commande(fd,"AUTH LOGIN") or not smtp_commande(fd,base64_encode(bytes_from_text(username))) or not smtp_commande(fd,base64_encode(bytes_from_text(password))) { tcp_close(fd); return false }
+    }
+    if not smtp_commande(fd,"MAIL FROM:<" + expediteur + ">") or not smtp_commande(fd,"RCPT TO:<" + destinataire + ">") { tcp_close(fd); return false }
+    if not tcp_write(fd,"DATA\r\n") or not smtp_ok(unwrap_or(tcp_read(fd),"")) { tcp_close(fd); return false }
+    let message = "From: " + expediteur + "\r\nTo: " + destinataire + "\r\nSubject: " + sujet + "\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + corps
+    if not tcp_write(fd,message + "\r\n.\r\n") or not smtp_ok(unwrap_or(tcp_read(fd),"")) { tcp_close(fd); return false }
+    let _quit = smtp_commande(fd,"QUIT")
+    tcp_close(fd)
+    return true
+}

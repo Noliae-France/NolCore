@@ -10,6 +10,7 @@ import "recherche.nol"
 import "tableau.nol"
 import "crawler.nol"
 import "../nolc/lib/http_client.nol"
+import "smtp.nol"
 
 fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
 
@@ -391,12 +392,25 @@ fn api_smtp_send(req: Requete, params: Map<Text>) -> WebResultat {
     if smtp == "" or not has(to) or not has(subject) or not has(body) { return erreur_json(422,"Unprocessable Content","smtp, to, subject et body sont obligatoires.",req) }
     let conn = db()
     if not has(conn) { return erreur_json(503,"Service Unavailable","PostgreSQL indisponible.",req) }
-    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO smtp_outbox(smtp_id,recipient,subject,body) VALUES($1,$2,$3,$4) RETURNING id", [smtp,unwrap_or(to,""),unwrap_or(subject,""),unwrap_or(body,"")])
-    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(404,"Not Found","Profil SMTP introuvable.",req) }
+    let profile = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT host,port,username,secret_env FROM smtp_profiles WHERE id=$1 AND enabled=true", [smtp])
+    if not has(profile) or pg_lignes(unwrap_or(profile,ptr_null())) != 1 { if has(profile) { pg_liberer(unwrap_or(profile,ptr_null())) }; pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(404,"Not Found","Profil SMTP introuvable.",req) }
+    let p = unwrap_or(profile,ptr_null())
+    let host = unwrap_or(pg_valeur(p,0,0),"")
+    let port = unwrap_or(parse_int(unwrap_or(pg_valeur(p,0,1),"587")),587)
+    let username = unwrap_or(pg_valeur(p,0,2),"")
+    let secret_env = unwrap_or(pg_valeur(p,0,3),"")
+    let password = unwrap_or(env(secret_env),"")
+    let expediteur = unwrap_or(env("NOLCORE_SMTP_" + upper(smtp) + "_FROM"),username)
+    let ok = smtp_envoyer(host,port,username,password,expediteur,unwrap_or(to,""),unwrap_or(subject,""),unwrap_or(body,""))
+    var status = "failed"
+    if ok { status = "sent" }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO smtp_outbox(smtp_id,recipient,subject,body,status) VALUES($1,$2,$3,$4,$5) RETURNING id", [smtp,unwrap_or(to,""),unwrap_or(subject,""),unwrap_or(body,""),status])
+    if not has(res) { pg_liberer(p); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Enregistrement SMTP impossible.",req) }
     let sortie = unwrap_or(res,ptr_null())
     let id = unwrap_or(pg_valeur(sortie,0,0),"")
-    pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null()))
-    return WebResultat.WebOk(reponse_json("{\"queued\":true,\"id\":" + json_texte(id) + "}"))
+    pg_liberer(sortie); pg_liberer(p); pg_fermer(unwrap_or(conn,ptr_null()))
+    if not ok { return erreur_json(502,"Bad Gateway","Échec de la livraison SMTP, message conservé en échec.",req) }
+    return WebResultat.WebOk(reponse_json("{\"sent\":true,\"id\":" + json_texte(id) + "}"))
 }
 
 fn api_smtp_pool(req: Requete, params: Map<Text>) -> WebResultat {
@@ -422,6 +436,22 @@ fn api_smtp_remove(req: Requete, params: Map<Text>) -> WebResultat {
     if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }
     pg_fermer(unwrap_or(conn,ptr_null()))
     return WebResultat.WebOk(reponse_json("{\"removed\":true}"))
+}
+
+fn api_admin_smtp_create(req: Requete, _params: Map<Text>) -> WebResultat {
+    if not admin_autorise(req) { return erreur_json(403,"Forbidden","Droit administrateur requis.",req) }
+    let id = champ_entree(req,"id")
+    let host = champ_entree(req,"host")
+    let port = champ_entree(req,"port")
+    let username = champ_entree(req,"username")
+    let secret_env = champ_entree(req,"secret_env")
+    if not has(id) or not has(host) or not has(username) or not has(secret_env) { return erreur_json(422,"Unprocessable Content","id, host, username et secret_env sont obligatoires.",req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503,"Service Unavailable","PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO smtp_profiles(id,host,port,username,secret_env) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET host=$2,port=$3,username=$4,secret_env=$5,enabled=true", [unwrap_or(id,""),unwrap_or(host,""),unwrap_or(port,"587"),unwrap_or(username,""),unwrap_or(secret_env,"")])
+    if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"configured\":true}"))
 }
 
 fn api_admin_config(req: Requete, section: Text) -> WebResultat {
@@ -506,6 +536,7 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/user/", api_admin_users)
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/ia/", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_admin_config(r,"ia") })
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/smtp/", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_admin_config(r,"smtp") })
+    route_type(methodes, patrons, handlers, "POST", "/v1/admin/smtp/", api_admin_smtp_create)
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/crawler/", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_admin_config(r,"crawler") })
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/discord/", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_admin_config(r,"discord") })
     route_type(methodes, patrons, handlers, "GET", "/connexion", page_connexion)
