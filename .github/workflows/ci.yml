@@ -29,10 +29,11 @@ jobs:
             -d '{"email":"ci@example.test","name":"CI User","password":"ci-password-123"}' > /tmp/register.json
           curl -fsS -X POST http://127.0.0.1:8080/v1/user/login \
             -H 'Content-Type: application/json' \
-            -d '{"email":"ci@example.test","password":"ci-password-123"}' > /tmp/login.json
+            -c /tmp/cookies.txt -d '{"email":"ci@example.test","password":"ci-password-123"}' > /tmp/login.json
           TOKEN=$(jq -r .token /tmp/login.json)
           test "$TOKEN" != "null" && test -n "$TOKEN"
           curl -fsS http://127.0.0.1:8080/v1/user/me -H "Authorization: Bearer $TOKEN" | jq -e '.email == "ci@example.test"'
+          curl -fsS http://127.0.0.1:8080/v1/user/me -b /tmp/cookies.txt | jq -e '.email == "ci@example.test"'
           docker stop nolcore-smoke
           docker stop nolcore-db
           docker network rm nolcore-ci

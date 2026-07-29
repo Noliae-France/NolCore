@@ -7,4 +7,6 @@ CREATE TABLE IF NOT EXISTS permissions (code TEXT PRIMARY KEY, description TEXT 
 CREATE TABLE IF NOT EXISTS user_permissions (user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, permission_code TEXT REFERENCES permissions(code) ON DELETE CASCADE, PRIMARY KEY(user_id, permission_code));
 CREATE TABLE IF NOT EXISTS audit_logs (id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, action TEXT NOT NULL, resource TEXT NOT NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS audit_search_rate_idx ON audit_logs(action, created_at);
+CREATE TABLE IF NOT EXISTS user_sessions (session_id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, email TEXT NOT NULL, ip TEXT NOT NULL, issued_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, revoked BOOLEAN NOT NULL DEFAULT false);
+CREATE INDEX IF NOT EXISTS user_sessions_lookup_idx ON user_sessions(token_hash, ip, email, expires_at);
 INSERT INTO permissions(code,description) VALUES ('users.read','Lire les utilisateurs'),('users.manage','Gérer les utilisateurs'),('admin.read','Accéder à l’administration'),('documents.write','Créer des documents'),('ai.use','Utiliser l’interface IA') ON CONFLICT DO NOTHING;
