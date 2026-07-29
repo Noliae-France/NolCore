@@ -16,6 +16,12 @@ fn erreur_json(code: Int, titre: Text, detail: Text, req: Requete) -> WebResulta
     return WebResultat.WebEchec(erreur_http(code, titre, detail, requete_id(req)))
 }
 
+fn champ_entree(req: Requete, nom: Text) -> Option<Text> {
+    let json = requete_json(req)
+    if has(json) { return json_texte_champ(unwrap_or(json, ""), nom) }
+    return requete_form(req, nom)
+}
+
 fn utilisateur(req: Requete, secret: Text) -> Option<Text> {
     let token = requete_bearer(req)
     if not has(token) { return none }
@@ -33,12 +39,9 @@ fn api_capacites(_req: Requete, _params: Map<Text>) -> WebResultat {
 }
 
 fn api_register(req: Requete, _params: Map<Text>) -> WebResultat {
-    let corps = requete_json(req)
-    if not has(corps) { return erreur_json(400, "Bad Request", "JSON invalide.", req) }
-    let source = unwrap_or(corps, "")
-    let email = json_texte_champ(source, "email")
-    let nom = json_texte_champ(source, "name")
-    let mot = json_texte_champ(source, "password")
+    let email = champ_entree(req, "email")
+    let nom = champ_entree(req, "name")
+    let mot = champ_entree(req, "password")
     if not has(email) or not has(nom) or not has(mot) { return erreur_json(422, "Unprocessable Content", "email, name et password sont obligatoires.", req) }
     let secret = bytes_from_text(unwrap_or(mot, ""))
     let hash = mot_de_passe_hache(secret)
@@ -81,11 +84,8 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
 }
 
 fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
-    let corps = requete_json(req)
-    if not has(corps) { return erreur_json(400, "Bad Request", "JSON invalide.", req) }
-    let source = unwrap_or(corps, "")
-    let email = json_texte_champ(source, "email")
-    let mot = json_texte_champ(source, "password")
+    let email = champ_entree(req, "email")
+    let mot = champ_entree(req, "password")
     if not has(email) or not has(mot) { return erreur_json(422, "Unprocessable Content", "email et password sont obligatoires.", req) }
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
