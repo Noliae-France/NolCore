@@ -259,8 +259,13 @@ fn api_ia_modele(req: Requete, params: Map<Text>) -> WebResultat {
     let texte = parametre(params, "text")
     if fournisseur == "" or modele == "" or texte == "" { return erreur_json(422,"Unprocessable Content","Fournisseur, modèle et texte sont obligatoires.",req) }
     let prefix = "NOLCORE_" + upper(fournisseur)
-    let url = unwrap_or(env(prefix + "_URL"), "")
     let token = unwrap_or(env(prefix + "_TOKEN"), "")
+    var url = unwrap_or(env(prefix + "_URL"), "")
+    if url == "" and fournisseur == "claude" { url = "https://api.anthropic.com/v1/messages" }
+    if url == "" and (fournisseur == "chatgpt" or fournisseur == "openai") { url = "https://api.openai.com/v1/chat/completions" }
+    if url == "" and fournisseur == "mistral" { url = "https://api.mistral.ai/v1/chat/completions" }
+    if url == "" and fournisseur == "gemini" { url = "https://generativelanguage.googleapis.com/v1beta/models/" + modele + ":generateContent" }
+    if fournisseur == "gemini" and has(find(url, "?")) == false { url = url + "?key=" + token }
     var resultat = "Fournisseur " + fournisseur + " configuré pour le modèle " + modele + "."
     if url != "" and token != "" {
         let corps = "{\"model\":" + json_texte(modele) + ",\"messages\":[{\"role\":\"user\",\"content\":" + json_texte(texte) + "}]}"
