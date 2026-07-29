@@ -103,9 +103,13 @@ Variables de configuration :
 
 ```env
 NOLCORE_CLAUDE_URL=https://...
+NOLCORE_CLAUDE_TOKEN=...
 NOLCORE_CHATGPT_URL=https://...
+NOLCORE_CHATGPT_TOKEN=...
 NOLCORE_MISTRAL_URL=https://...
+NOLCORE_MISTRAL_TOKEN=...
 NOLCORE_GEMINI_URL=https://...
+NOLCORE_GEMINI_TOKEN=...
 ```
 
 ### Recherche et crawler
@@ -127,6 +131,14 @@ recherche de l’utilisateur.
 ```text
 GET  /v1/perms
 GET  /v1/admin/
+POST /v1/smtp/:idsmtp/send
+GET  /v1/smtp/:idsmtp/pool
+DELETE /v1/smtp/:idsmtp/remove
+GET  /v1/admin/user/
+GET  /v1/admin/ia/
+GET  /v1/admin/smtp/
+GET  /v1/admin/crawler/
+GET  /v1/admin/discord/
 GET  /v1/discord/bot
 POST /v1/discord/webhook
 ```

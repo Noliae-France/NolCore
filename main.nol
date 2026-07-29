@@ -257,10 +257,11 @@ fn api_ia_modele(req: Requete, params: Map<Text>) -> WebResultat {
     let modele = parametre(params, "modelia")
     let texte = parametre(params, "text")
     if fournisseur == "" or modele == "" or texte == "" { return erreur_json(422,"Unprocessable Content","Fournisseur, modèle et texte sont obligatoires.",req) }
-    let cle = "NOLCORE_" + upper(fournisseur) + "_URL"
-    let url = unwrap_or(env(cle), "")
+    let prefix = "NOLCORE_" + upper(fournisseur)
+    let url = unwrap_or(env(prefix + "_URL"), "")
+    let token = unwrap_or(env(prefix + "_TOKEN"), "")
     var resultat = "Fournisseur " + fournisseur + " configuré pour le modèle " + modele + "."
-    if url != "" {
+    if url != "" and token != "" {
         let corps = "{\"model\":" + json_texte(modele) + ",\"messages\":[{\"role\":\"user\",\"content\":" + json_texte(texte) + "}]}"
         let rep = http_post(url, "application/json", corps)
         if has(rep) and unwrap_or(rep, ReponseHttp { statut:0, entetes:"", corps:"" }).statut >= 200 and unwrap_or(rep, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 { resultat = unwrap_or(rep, ReponseHttp { statut:0, entetes:"", corps:"" }).corps }
@@ -362,6 +363,69 @@ fn api_discord_webhook(req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json("{\"sent\":true}"))
 }
 
+fn admin_autorise(req: Requete) -> Bool {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return false }
+    let conn = db()
+    if not has(conn) { return false }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT role FROM users WHERE id=$1", [unwrap_or(id,"")])
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return false }
+    let sortie = unwrap_or(res,ptr_null())
+    let ok = pg_lignes(sortie) == 1 and unwrap_or(pg_valeur(sortie,0,0),"") == "admin"
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null()))
+    return ok
+}
+
+fn api_smtp_send(req: Requete, params: Map<Text>) -> WebResultat {
+    if not admin_autorise(req) { return erreur_json(403,"Forbidden","Droit administrateur requis.",req) }
+    let smtp = parametre(params,"idsmtp")
+    let to = champ_entree(req,"to")
+    let subject = champ_entree(req,"subject")
+    let body = champ_entree(req,"body")
+    if smtp == "" or not has(to) or not has(subject) or not has(body) { return erreur_json(422,"Unprocessable Content","smtp, to, subject et body sont obligatoires.",req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503,"Service Unavailable","PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO smtp_outbox(smtp_id,recipient,subject,body) VALUES($1,$2,$3,$4) RETURNING id", [smtp,unwrap_or(to,""),unwrap_or(subject,""),unwrap_or(body,"")])
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(404,"Not Found","Profil SMTP introuvable.",req) }
+    let sortie = unwrap_or(res,ptr_null())
+    let id = unwrap_or(pg_valeur(sortie,0,0),"")
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"queued\":true,\"id\":" + json_texte(id) + "}"))
+}
+
+fn api_smtp_pool(req: Requete, params: Map<Text>) -> WebResultat {
+    if not admin_autorise(req) { return erreur_json(403,"Forbidden","Droit administrateur requis.",req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503,"Service Unavailable","PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT id,recipient,subject,status FROM smtp_outbox WHERE smtp_id=$1 ORDER BY id DESC LIMIT 100", [parametre(params,"idsmtp")])
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Pool SMTP indisponible.",req) }
+    let sortie = unwrap_or(res,ptr_null())
+    var items = "["
+    var i = 0
+    while i < pg_lignes(sortie) { if i > 0 { items += "," }; items += "{\"id\":" + json_texte(unwrap_or(pg_valeur(sortie,i,0),"")) + ",\"to\":" + json_texte(unwrap_or(pg_valeur(sortie,i,1),"")) + ",\"subject\":" + json_texte(unwrap_or(pg_valeur(sortie,i,2),"")) + ",\"status\":" + json_texte(unwrap_or(pg_valeur(sortie,i,3),"")) + "}"; i = i + 1 }
+    items += "]"
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json(items))
+}
+
+fn api_smtp_remove(req: Requete, params: Map<Text>) -> WebResultat {
+    if not admin_autorise(req) { return erreur_json(403,"Forbidden","Droit administrateur requis.",req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503,"Service Unavailable","PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "DELETE FROM smtp_profiles WHERE id=$1", [parametre(params,"idsmtp")])
+    if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"removed\":true}"))
+}
+
+fn api_admin_config(req: Requete, section: Text) -> WebResultat {
+    if not admin_autorise(req) { return erreur_json(403,"Forbidden","Droit administrateur requis.",req) }
+    var configured = false
+    if section == "ia" { configured = unwrap_or(env("NOLCORE_CHATGPT_TOKEN"),"") != "" or unwrap_or(env("NOLCORE_MISTRAL_TOKEN"),"") != "" }
+    if section == "discord" { configured = unwrap_or(env("NOLCORE_DISCORD_BOT_TOKEN"),"") != "" or unwrap_or(env("NOLCORE_DISCORD_WEBHOOK_URL"),"") != "" }
+    return WebResultat.WebOk(reponse_json("{\"section\":" + json_texte(section) + ",\"configured\":" + json_bool(configured) + "}"))
+}
+
 fn api_crawler(req: Requete, _params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
     if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
@@ -430,6 +494,14 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "GET", "/v1/crawler/result/:url", api_crawler_result)
     route_type(methodes, patrons, handlers, "GET", "/v1/discord/bot", api_discord_bot)
     route_type(methodes, patrons, handlers, "POST", "/v1/discord/webhook", api_discord_webhook)
+    route_type(methodes, patrons, handlers, "POST", "/v1/smtp/:idsmtp/send", api_smtp_send)
+    route_type(methodes, patrons, handlers, "GET", "/v1/smtp/:idsmtp/pool", api_smtp_pool)
+    route_type(methodes, patrons, handlers, "DELETE", "/v1/smtp/:idsmtp/remove", api_smtp_remove)
+    route_type(methodes, patrons, handlers, "GET", "/v1/admin/user/", api_admin_users)
+    route_type(methodes, patrons, handlers, "GET", "/v1/admin/ia/", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_admin_config(r,"ia") })
+    route_type(methodes, patrons, handlers, "GET", "/v1/admin/smtp/", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_admin_config(r,"smtp") })
+    route_type(methodes, patrons, handlers, "GET", "/v1/admin/crawler/", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_admin_config(r,"crawler") })
+    route_type(methodes, patrons, handlers, "GET", "/v1/admin/discord/", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_admin_config(r,"discord") })
     route_type(methodes, patrons, handlers, "GET", "/connexion", page_connexion)
     route_type(methodes, patrons, handlers, "GET", "/inscription", page_inscription)
     route_type(methodes, patrons, handlers, "GET", "/recherche", page_recherche)
