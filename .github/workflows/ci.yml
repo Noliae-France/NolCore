@@ -19,9 +19,18 @@ jobs:
           docker run -d --rm --name nolcore-db --network nolcore-ci \
             -e POSTGRES_DB=nolcore -e POSTGRES_USER=nolcore -e POSTGRES_PASSWORD=ci_password \
             -v "$PWD/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro" postgres:16-alpine
+          mkdir -p /tmp/nolcore-smtp-certs
+          docker build -t nolcore-postfix:ci tests/postfix
+          docker run -d --rm --name nolcore-postfix --network nolcore-ci \
+            -v /tmp/nolcore-smtp-certs:/certs nolcore-postfix:ci
+          for i in $(seq 1 30); do test -f /tmp/nolcore-smtp-certs/ca.crt && break || sleep 1; done
           for i in $(seq 1 30); do docker exec nolcore-db pg_isready -U nolcore -d nolcore && break || sleep 1; done
           docker run -d --rm --name nolcore-smoke --network nolcore-ci -p 8080:8080 \
             -e NOLIAE_SESSION_SECRET=ci-secret-0123456789-0123456789-0123 \
+            -e NOLCORE_SMTP_CI_SMTP_465_FROM=nolcore@smtp-test \
+            -e NOLCORE_SMTP_CI_SMTP_587_FROM=nolcore@smtp-test \
+            -e NOLCORE_SMTP_CA_FILE=/certs/ca.crt \
+            -v /tmp/nolcore-smtp-certs:/certs:ro \
             -e NOLCORE_DATABASE_URL=postgres://nolcore:ci_password@nolcore-db:5432/nolcore nolcore:ci
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/api/health && break || sleep 1; done
           curl -fsS -X POST http://127.0.0.1:8080/v1/user/register \
@@ -45,11 +54,22 @@ jobs:
           curl -fsS http://127.0.0.1:8080/v1/admin/user/ -b /tmp/new-cookies.txt | jq -e 'type == "array"'
           curl -fsS -X POST http://127.0.0.1:8080/v1/admin/smtp/ \
             -H 'Content-Type: application/json' -b /tmp/new-cookies.txt \
-            -d '{"id":"ci-smtp","host":"smtp.example.test","port":"465","username":"ci@example.test","secret_env":"CI_SMTP_PASSWORD"}' | jq -e '.configured == true'
+            -d '{"id":"ci-smtp-465","host":"smtp-test","port":"465","username":"","secret_env":"CI_SMTP_PASSWORD"}' | jq -e '.configured == true'
+          curl -fsS -X POST http://127.0.0.1:8080/v1/smtp/ci-smtp-465/send \
+            -H 'Content-Type: application/json' -b /tmp/new-cookies.txt \
+            -d '{"to":"ci@smtp-test","subject":"NolCore CI 465","body":"SMTPS 465 OK"}' | jq -e '.sent == true'
+          curl -fsS http://127.0.0.1:8080/v1/smtp/ci-smtp-465/pool -b /tmp/new-cookies.txt | jq -e '.[0].status == "sent"'
+          curl -fsS -X POST http://127.0.0.1:8080/v1/admin/smtp/ \
+            -H 'Content-Type: application/json' -b /tmp/new-cookies.txt \
+            -d '{"id":"ci-smtp-587","host":"smtp-test","port":"587","username":"","secret_env":"CI_SMTP_PASSWORD"}' | jq -e '.configured == true'
+          curl -fsS -X POST http://127.0.0.1:8080/v1/smtp/ci-smtp-587/send \
+            -H 'Content-Type: application/json' -b /tmp/new-cookies.txt \
+            -d '{"to":"ci@smtp-test","subject":"NolCore CI 587","body":"STARTTLS 587 OK"}' | jq -e '.sent == true'
           curl -fsS -X POST http://127.0.0.1:8080/api/documents \
             -H 'Content-Type: application/json' -b /tmp/new-cookies.txt \
             -d '{"title":"CI hello","content":"hello NolCore search"}' | jq -e '.id != null'
           curl -fsS http://127.0.0.1:8080/v1/search/text/hello -b /tmp/new-cookies.txt | jq -e 'length >= 1'
           docker stop nolcore-smoke
+          docker stop nolcore-postfix
           docker stop nolcore-db
           docker network rm nolcore-ci

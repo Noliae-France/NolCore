@@ -21,7 +21,9 @@ fn smtp_envoyer(host: Text, port: Int, username: Text, password: Text, expediteu
     if port == 587 {
         if not smtp_ok(unwrap_or(tcp_read(fd),"")) or not smtp_commande(fd,"EHLO nolcore") or not smtp_commande(fd,"STARTTLS") { tcp_close(fd); return false }
     }
-    let contexte = tls_client_contexte()
+    var contexte = tls_client_contexte()
+    let ca_fichier = unwrap_or(env("NOLCORE_SMTP_CA_FILE"), "")
+    if ca_fichier != "" { contexte = tls_client_contexte_ca(ca_fichier) }
     if not has(contexte) { tcp_close(fd); return false }
     let ctx = unwrap_or(contexte,ptr_null())
     let session = tls_connecter(ctx,fd,host)
