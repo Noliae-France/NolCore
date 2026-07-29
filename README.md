@@ -82,6 +82,7 @@ ne sont pas compilés ni servis par le core.
 | Variable | Usage |
 |---|---|
 | `NOLIAE_SESSION_SECRET` | Secret de signature, 32 caractères minimum |
+| `NOLIAE_COOKIE_DOMAIN` | `.noliae.com` pour partager la session entre sous-domaines de production |
 | `NOLCORE_DATABASE_URL` | URL PostgreSQL du gateway |
 | `NOLCORE_IA_URL` | URL interne de NolCore-IA (`http://ia:8092` en Compose) |
 | `NOLCORE_CRAWLER_URL` | URL interne de NolCore-Crawler (`http://crawler:8091`) |
