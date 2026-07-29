@@ -14,7 +14,7 @@ jobs:
           load: true
       - name: Smoke test HTTP server
         run: |
-          docker run -d --rm --name nolcore-smoke -p 8080:8080 -e NOLIAE_SESSION_SECRET=ci-secret-0123456789-0123456789 nolcore:ci
+          docker run -d --rm --name nolcore-smoke -p 8080:8080 -e NOLIAE_SESSION_SECRET=ci-secret-0123456789-0123456789-0123 nolcore:ci
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/api/health && break || sleep 1; done
           curl -fsS http://127.0.0.1:8080/v1/user/me -o /tmp/me.out -w '%{http_code}' | grep -q '^401$'
           docker stop nolcore-smoke
