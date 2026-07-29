@@ -15,9 +15,10 @@ Un backend MVC natif en **Nolc** pour construire les services de [noliae.com](ht
 
 ## Pourquoi NolCore ?
 
-NolCore est le socle partagé des applications Noliae. Il regroupe dans un seul
-service natif les briques qui doivent rester cohérentes partout : sécurité,
-comptes, permissions, IA, moteur de recherche, crawler et administration.
+NolCore est le socle partagé des applications Noliae. Le dépôt principal
+déploie le gateway natif : sécurité, comptes, permissions, recherche,
+persistance et administration. Les traitements IA et le crawling sont des
+services indépendants, appelés par le gateway sur le réseau interne.
 
 Les services sont publiés séparément pour faciliter les déploiements
 microservices :
@@ -45,9 +46,9 @@ Noliae plutôt que de dépendre d’une boîte noire.
 | API | Routeur Nolc, contrôleurs et services natifs ; les `.nhtml` sont indicatifs |
 | Users & Auth | Inscription, connexion, profil, changement de compte, sessions 24 h |
 | Sessions | Cookie signé lié à l’utilisateur, l’email, l’IP, l’horodatage et un nonce aléatoire |
-| IA | Agrégation Claude, ChatGPT, Mistral et Gemini par fournisseur/modèle |
+| IA | Routage authentifié vers l’agrégateur Claude, ChatGPT, Mistral et Gemini |
 | Recherche | Index PostgreSQL plein texte, recherche textuelle, IA et base pour images |
-| Crawler | Visite HTTP, lecture de `robots.txt`, refus des chemins interdits et indexation |
+| Crawler | Routage authentifié vers le crawler qui applique `robots.txt` |
 | Permissions | Permissions par utilisateur, rôles et audit des actions |
 | Administration | Gestion des utilisateurs et supervision du cœur |
 | Intégrations | Bot Discord et webhook Discord configurables |
@@ -61,7 +62,6 @@ NolCore
 │   ├── *.nhtml              # Gabarits accueil, login, inscription, recherche
 │   └── static/              # CSS de démonstration
 ├── schema.sql               # PostgreSQL et migrations initiales
-├── crawler.nol              # HTTP + politique robots.txt
 ├── vendor/nolc/lib/         # stdlib Nolc compatible avec le binaire public
 ├── Dockerfile
 └── docker-compose.yml
@@ -159,9 +159,10 @@ POST /v1/crawler/visite/:url
 GET  /v1/crawler/result/:url
 ```
 
-Le crawler ne visite une URL qu’après lecture de son `robots.txt`. Les pages
-acceptées sont indexées dans PostgreSQL et deviennent disponibles dans la
-recherche de l’utilisateur.
+Le service [NolCore-Crawler](https://github.com/Noliae-France/NolCore-Crawler)
+ne visite une URL qu’après lecture de son `robots.txt`. Le gateway conserve les
+résultats indexés dans PostgreSQL et les rend disponibles dans la recherche de
+l’utilisateur.
 
 ### Permissions, administration et Discord
 
