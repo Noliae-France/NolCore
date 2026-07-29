@@ -42,12 +42,19 @@ printf '%s\n' \
   'mail_location = maildir:~/Maildir' \
   'ssl = no' \
   'disable_plaintext_auth = no' \
+  'auth_mechanisms = plain login' \
   'userdb passwd {' \
   '}' \
   'passdb pam {' \
   '}' \
+  'service auth {' \
+  '  unix_listener auth-userdb {' \
+  '    mode = 0600' \
+  '    user = dovecot' \
+  '  }' \
+  '}' \
   > /etc/dovecot/dovecot.conf
-dovecot
+dovecot -c /etc/dovecot/dovecot.conf
 
 postfix start
 trap 'postfix stop; exit 0' TERM INT
