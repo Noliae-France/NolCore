@@ -86,7 +86,8 @@ jobs:
           curl -fsS -X POST http://127.0.0.1:8080/api/documents \
             -H 'Content-Type: application/json' -b /tmp/new-cookies.txt \
             -d '{"title":"CI hello","content":"hello NolCore search"}' | jq -e '.id != null'
-          curl -fsS http://127.0.0.1:8080/v1/search/text/hello -b /tmp/new-cookies.txt | jq -e 'length >= 1'
+          curl -fsS http://127.0.0.1:8080/v1/search/text/hello -b /tmp/new-cookies.txt > /tmp/search.json
+          jq -e 'type == "array" and length >= 1' /tmp/search.json || { cat /tmp/search.json; exit 1; }
           docker stop nolcore-smoke
           docker stop nolcore-postfix
           docker rm nolcore-postfix
