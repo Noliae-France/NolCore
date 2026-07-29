@@ -14,7 +14,25 @@ jobs:
           load: true
       - name: Smoke test HTTP server
         run: |
-          docker run -d --rm --name nolcore-smoke -p 8080:8080 -e NOLIAE_SESSION_SECRET=ci-secret-0123456789-0123456789-0123 nolcore:ci
+          set -e
+          docker network create nolcore-ci
+          docker run -d --rm --name nolcore-db --network nolcore-ci \
+            -e POSTGRES_DB=nolcore -e POSTGRES_USER=nolcore -e POSTGRES_PASSWORD=ci_password \
+            -v "$PWD/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro" postgres:16-alpine
+          for i in $(seq 1 30); do docker exec nolcore-db pg_isready -U nolcore -d nolcore && break || sleep 1; done
+          docker run -d --rm --name nolcore-smoke --network nolcore-ci -p 8080:8080 \
+            -e NOLIAE_SESSION_SECRET=ci-secret-0123456789-0123456789-0123 \
+            -e NOLCORE_DATABASE_URL=postgres://nolcore:ci_password@nolcore-db:5432/nolcore nolcore:ci
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/api/health && break || sleep 1; done
-          curl -fsS http://127.0.0.1:8080/v1/user/me -o /tmp/me.out -w '%{http_code}' | grep -q '^401$'
+          curl -fsS -X POST http://127.0.0.1:8080/v1/user/register \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.test","name":"CI User","password":"ci-password-123"}' > /tmp/register.json
+          curl -fsS -X POST http://127.0.0.1:8080/v1/user/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.test","password":"ci-password-123"}' > /tmp/login.json
+          TOKEN=$(jq -r .token /tmp/login.json)
+          test "$TOKEN" != "null" && test -n "$TOKEN"
+          curl -fsS http://127.0.0.1:8080/v1/user/me -H "Authorization: Bearer $TOKEN" | jq -e '.email == "ci@example.test"'
           docker stop nolcore-smoke
+          docker stop nolcore-db
+          docker network rm nolcore-ci
