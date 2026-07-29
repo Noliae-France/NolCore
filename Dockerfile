@@ -10,8 +10,5 @@ FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends libpq5 libsodium23 libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/nolcore /app/nolcore
 WORKDIR /app
-WORKDIR /app
-COPY main.nol accueil.nhtml ./
-RUN nolc nhtml accueil.nhtml && nolc build main.nol -o nolcore --lien pq --chemin-lib /usr/lib/x86_64-linux-gnu
 EXPOSE 8080
 CMD ["/app/nolcore"]
