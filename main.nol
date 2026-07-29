@@ -61,7 +61,7 @@ fn middleware_cors_configurable(req: Requete, rep: Reponse) -> Reponse {
     let recu = unwrap_or(origine, "")
     for candidate in split(unwrap_or(env("NOLCORE_ALLOWED_ORIGINS"), ""), ",") {
         if trim(candidate) == recu and recu != "" {
-            var out = reponse_cors(rep, recu, "GET, POST, OPTIONS", "Content-Type, Authorization, X-CSRF-Token")
+            var out = reponse_cors(rep, recu, "GET, POST, DELETE, OPTIONS", "Content-Type, Authorization, X-CSRF-Token")
             out = reponse_avec_entete(out, "Access-Control-Allow-Credentials", "true")
             return out
         }
@@ -91,7 +91,18 @@ fn utilisateur(req: Requete, secret: Text) -> Option<Text> {
     let token = requete_bearer(req)
     if has(token) {
         let session = session_verifie(secret, unwrap_or(token, ""), maintenant_epoch())
-        if has(session) { return some(unwrap_or(session, SessionSigne { sujet: "", expiration: 0, nonce: "" }).sujet) }
+        if has(session) {
+            let sujet = unwrap_or(session, SessionSigne { sujet: "", expiration: 0, nonce: "" }).sujet
+            let conn = db()
+            if not has(conn) { return none }
+            let hash = hmac_sha256_hex(bytes_from_text(secret), bytes_from_text(unwrap_or(token,"")))
+            let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT user_id FROM user_sessions WHERE bearer_token_hash=$1 AND user_id=$2 AND revoked=false AND expires_at > now()", [hash,sujet])
+            if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return none }
+            let sortie = unwrap_or(res,ptr_null())
+            if pg_lignes(sortie) != 1 { pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null())); return none }
+            pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null()))
+            return some(sujet)
+        }
     }
     let cookie = requete_cookie(req, "nol_session")
     if not has(cookie) { return none }
@@ -289,7 +300,8 @@ fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
         let cookie_hash = hmac_sha256_hex(bytes_from_text(unwrap_or(env("NOLIAE_SESSION_SECRET"), "")), bytes_from_text(unwrap_or(cookie,"")))
         let session_id = random_hex(16)
         if has(session_id) {
-            let saved_session = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO user_sessions(session_id,token_hash,user_id,email,ip,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '24 hours')", [unwrap_or(session_id,""),cookie_hash,id,unwrap_or(email,""),ip_requete(req)])
+            let bearer_hash = hmac_sha256_hex(bytes_from_text(unwrap_or(env("NOLIAE_SESSION_SECRET"), "")), bytes_from_text(unwrap_or(token,"")))
+            let saved_session = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO user_sessions(session_id,token_hash,bearer_token_hash,user_id,email,ip,expires_at) VALUES($1,$2,$3,$4,$5,$6,now()+interval '24 hours')", [unwrap_or(session_id,""),cookie_hash,bearer_hash,id,unwrap_or(email,""),ip_requete(req)])
             if has(saved_session) { pg_liberer(unwrap_or(saved_session,ptr_null())) }
         }
     }
@@ -378,6 +390,48 @@ fn api_me(req: Requete, _params: Map<Text>) -> WebResultat {
     let answer = "{\"id\":" + json_texte(unwrap_or(pg_valeur(sortie,0,0),"")) + ",\"email\":" + json_texte(unwrap_or(pg_valeur(sortie,0,1),"")) + ",\"name\":" + json_texte(unwrap_or(pg_valeur(sortie,0,2),"")) + ",\"role\":" + json_texte(unwrap_or(pg_valeur(sortie,0,3),"")) + "}"
     pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
     return WebResultat.WebOk(reponse_json(answer))
+}
+
+// Inventaire minimal des appareils connectés. Les empreintes de token ne
+// sortent jamais de PostgreSQL ; l'utilisateur ne voit que ses propres IP et
+// dates d'expiration.
+fn api_user_sessions(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT session_id,ip,issued_at,expires_at FROM user_sessions WHERE user_id=$1 AND revoked=false AND expires_at>now() ORDER BY issued_at DESC LIMIT 100", [unwrap_or(id,"")])
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Lecture des sessions impossible.",req) }
+    let rows = unwrap_or(res,ptr_null()); var items = "["; var i = 0
+    while i < pg_lignes(rows) {
+        if i > 0 { items += "," }
+        items += "{\"id\":" + json_texte(unwrap_or(pg_valeur(rows,i,0),"")) + ",\"ip\":" + json_texte(unwrap_or(pg_valeur(rows,i,1),"")) + ",\"issued_at\":" + json_texte(unwrap_or(pg_valeur(rows,i,2),"")) + ",\"expires_at\":" + json_texte(unwrap_or(pg_valeur(rows,i,3),"")) + "}"
+        i = i + 1
+    }
+    pg_liberer(rows); pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json(items + "]"))
+}
+
+fn api_user_session_revoke(req: Requete, params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let session_id = parametre(params,"session_id")
+    if session_id == "" { return erreur_json(422,"Unprocessable Content","Identifiant de session obligatoire.",req) }
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let changed = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE user_sessions SET revoked=true WHERE session_id=$1 AND user_id=$2 AND revoked=false RETURNING session_id", [session_id,unwrap_or(id,"")])
+    if not has(changed) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Révocation impossible.",req) }
+    let rows = unwrap_or(changed,ptr_null()); let ok = pg_lignes(rows) == 1; pg_liberer(rows); pg_fermer(unwrap_or(conn,ptr_null()))
+    if not ok { return erreur_json(404,"Not Found","Session introuvable.",req) }
+    return WebResultat.WebOk(reponse_json("{\"revoked\":true}"))
+}
+
+fn api_user_sessions_revoke_all(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let changed = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE user_sessions SET revoked=true WHERE user_id=$1 AND revoked=false", [unwrap_or(id,"")])
+    if has(changed) { pg_liberer(unwrap_or(changed,ptr_null())) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"revoked\":true}"))
 }
 
 fn api_document(req: Requete, _params: Map<Text>) -> WebResultat {
@@ -758,6 +812,9 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "POST", "/v1/user/login", api_login)
     route_type(methodes, patrons, handlers, "GET", "/v1/user/verify", api_verify_email)
     route_type(methodes, patrons, handlers, "GET", "/v1/user/me", api_me)
+    route_type(methodes, patrons, handlers, "GET", "/v1/user/me/sessions", api_user_sessions)
+    route_type(methodes, patrons, handlers, "DELETE", "/v1/user/me/sessions/:session_id", api_user_session_revoke)
+    route_type(methodes, patrons, handlers, "POST", "/v1/user/me/sessions/revoke-all", api_user_sessions_revoke_all)
     route_type(methodes, patrons, handlers, "POST", "/v1/user/resetpassword", api_user_reset)
     route_type(methodes, patrons, handlers, "POST", "/v1/user/me/changepassword", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_user_password(r, "change") })
     route_type(methodes, patrons, handlers, "POST", "/v1/user/me/changemail", fn (r: Requete, _p: Map<Text>) -> WebResultat { return api_user_field(r, "email") })

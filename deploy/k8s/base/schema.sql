@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS permissions (code TEXT PRIMARY KEY, description TEXT 
 CREATE TABLE IF NOT EXISTS user_permissions (user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, permission_code TEXT REFERENCES permissions(code) ON DELETE CASCADE, PRIMARY KEY(user_id, permission_code));
 CREATE TABLE IF NOT EXISTS audit_logs (id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, action TEXT NOT NULL, resource TEXT NOT NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS audit_search_rate_idx ON audit_logs(action, created_at);
-CREATE TABLE IF NOT EXISTS user_sessions (session_id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, email TEXT NOT NULL, ip TEXT NOT NULL, issued_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, revoked BOOLEAN NOT NULL DEFAULT false);
+CREATE TABLE IF NOT EXISTS user_sessions (session_id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, bearer_token_hash TEXT UNIQUE, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, email TEXT NOT NULL, ip TEXT NOT NULL, issued_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, revoked BOOLEAN NOT NULL DEFAULT false);
+ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS bearer_token_hash TEXT UNIQUE;
 CREATE INDEX IF NOT EXISTS user_sessions_lookup_idx ON user_sessions(token_hash, ip, email, expires_at);
 CREATE TABLE IF NOT EXISTS email_verification_tokens (token_hash TEXT PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ);
 CREATE TABLE IF NOT EXISTS password_reset_tokens (token_hash TEXT PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now());

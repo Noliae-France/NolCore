@@ -72,10 +72,16 @@ jobs:
           curl -fsS -X POST http://127.0.0.1:8080/v1/user/me/changepassword \
             -H 'Content-Type: application/json' -b /tmp/cookies.txt \
             -d '{"password":"ci-password-456"}' | jq -e '.updated == true'
+          # Le changement de mot de passe révoque volontairement la session
+          # courante. Une nouvelle connexion est requise avant toute route
+          # protégée suivante.
+          curl -fsS -X POST http://127.0.0.1:8080/v1/user/login \
+            -H 'Content-Type: application/json' -c /tmp/after-password-cookies.txt \
+            -d '{"email":"ci@example.test","password":"ci-password-456"}' | jq -e '.token != null'
           curl -fsS -X POST http://127.0.0.1:8080/v1/user/me/changemail \
-            -H 'Content-Type: application/json' -b /tmp/cookies.txt \
+            -H 'Content-Type: application/json' -b /tmp/after-password-cookies.txt \
             -d '{"email":"ci-renamed@example.test"}' | jq -e '.updated == true'
-          test "$(curl -sS http://127.0.0.1:8080/v1/user/me -b /tmp/cookies.txt -o /tmp/revoked.out -w '%{http_code}')" = "401"
+          test "$(curl -sS http://127.0.0.1:8080/v1/user/me -b /tmp/after-password-cookies.txt -o /tmp/revoked.out -w '%{http_code}')" = "401"
           curl -fsS -X POST http://127.0.0.1:8080/v1/user/login \
             -H 'Content-Type: application/json' -c /tmp/new-cookies.txt \
             -d '{"email":"ci-renamed@example.test","password":"ci-password-456"}' | jq -e '.token != null'
