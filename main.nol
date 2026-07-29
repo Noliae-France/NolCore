@@ -3,6 +3,7 @@ import "../Noliae Lang/lib/pg.nol"
 import "../Noliae Lang/lib/json.nol"
 import "../Noliae Lang/lib/sodium.nol"
 import "../Noliae Lang/lib/temps.nol"
+import "accueil.nol"
 
 fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
 
@@ -59,6 +60,104 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json("{\"answer\":\"Demande reçue par le service IA NolCore.\",\"message\":" + json_texte(unwrap_or(message, "")) + "}"))
 }
 
+fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
+    let corps = requete_json(req)
+    if not has(corps) { return erreur_json(400, "Bad Request", "JSON invalide.", req) }
+    let source = unwrap_or(corps, "")
+    let email = json_texte_champ(source, "email")
+    let mot = json_texte_champ(source, "password")
+    if not has(email) or not has(mot) { return erreur_json(422, "Unprocessable Content", "email et password sont obligatoires.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,email,display_name,password_hash,role FROM users WHERE email=$1", [unwrap_or(email, "")])
+    if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Identifiants invalides.", req) }
+    let sortie = unwrap_or(res, ptr_null())
+    if pg_lignes(sortie) != 1 { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Identifiants invalides.", req) }
+    let hash = unwrap_or(pg_valeur(sortie, 0, 3), "")
+    let valide = mot_de_passe_verifie(hash, bytes_from_text(unwrap_or(mot, "")))
+    if not valide { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Identifiants invalides.", req) }
+    let id = unwrap_or(pg_valeur(sortie, 0, 0), "")
+    let token = session_signe(unwrap_or(env("NOLIAE_SESSION_SECRET"), ""), id, 86400, maintenant_epoch())
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
+    if not has(token) { return erreur_json(500, "Internal Server Error", "Session indisponible.", req) }
+    return WebResultat.WebOk(reponse_json("{\"token\":" + json_texte(unwrap_or(token, "")) + ",\"user_id\":" + json_texte(id) + "}"))
+}
+
+fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
+    let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
+    let id = utilisateur(req, secret)
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let q = requete_query(req, "q")
+    if not has(q) or len(unwrap_or(q, "")) < 2 { return erreur_json(422, "Unprocessable Content", "q doit contenir au moins 2 caractères.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,title,content FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank(search_vector, plainto_tsquery('french',$2)) DESC LIMIT 30", [unwrap_or(id, ""), unwrap_or(q, "")])
+    if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
+    let sortie = unwrap_or(res, ptr_null())
+    var items = "["
+    var i = 0
+    while i < pg_lignes(sortie) {
+        if i > 0 { items = items + "," }
+        items = items + "{\"id\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 0), "")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 1), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 2), "")) + "}"
+        i = i + 1
+    }
+    items = items + "]"
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
+    return WebResultat.WebOk(reponse_json(items))
+}
+
+fn api_me(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,email,display_name,role,created_at FROM users WHERE id=$1", [unwrap_or(id, "")])
+    if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(404, "Not Found", "Utilisateur introuvable.", req) }
+    let sortie = unwrap_or(res, ptr_null())
+    if pg_lignes(sortie) != 1 { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(404, "Not Found", "Utilisateur introuvable.", req) }
+    let answer = "{\"id\":" + json_texte(unwrap_or(pg_valeur(sortie,0,0),"")) + ",\"email\":" + json_texte(unwrap_or(pg_valeur(sortie,0,1),"")) + ",\"name\":" + json_texte(unwrap_or(pg_valeur(sortie,0,2),"")) + ",\"role\":" + json_texte(unwrap_or(pg_valeur(sortie,0,3),"")) + "}"
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
+    return WebResultat.WebOk(reponse_json(answer))
+}
+
+fn api_document(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let corps = requete_json(req)
+    if not has(corps) { return erreur_json(400, "Bad Request", "JSON invalide.", req) }
+    let source = unwrap_or(corps, "")
+    let titre = json_texte_champ(source, "title")
+    let contenu = json_texte_champ(source, "content")
+    if not has(titre) or not has(contenu) { return erreur_json(422, "Unprocessable Content", "title et content sont obligatoires.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO documents(owner_id,title,content) VALUES($1,$2,$3) RETURNING id", [unwrap_or(id,""), unwrap_or(titre,""), unwrap_or(contenu,"")])
+    if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Création du document impossible.", req) }
+    let sortie = unwrap_or(res, ptr_null())
+    let doc_id = unwrap_or(pg_valeur(sortie, 0, 0), "")
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"id\":" + json_texte(doc_id) + "}"))
+}
+
+fn api_admin_users(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let role = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT role FROM users WHERE id=$1", [unwrap_or(id,"")])
+    if not has(role) or pg_lignes(unwrap_or(role, ptr_null())) != 1 or unwrap_or(pg_valeur(unwrap_or(role, ptr_null()),0,0), "user") != "admin" { if has(role) { pg_liberer(unwrap_or(role,ptr_null())) }; pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(403, "Forbidden", "Droit administrateur requis.", req) }
+    pg_liberer(unwrap_or(role, ptr_null()))
+    let res = pg_requete(unwrap_or(conn, ptr_null()), "SELECT id,email,display_name,role,created_at FROM users ORDER BY id DESC LIMIT 100")
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500, "Internal Server Error", "Lecture des utilisateurs impossible.", req) }
+    let sortie = unwrap_or(res, ptr_null())
+    var items = "["
+    var i = 0
+    while i < pg_lignes(sortie) { if i > 0 { items = items + "," }; items = items + "{\"id\":" + json_texte(unwrap_or(pg_valeur(sortie,i,0),"")) + ",\"email\":" + json_texte(unwrap_or(pg_valeur(sortie,i,1),"")) + ",\"name\":" + json_texte(unwrap_or(pg_valeur(sortie,i,2),"")) + ",\"role\":" + json_texte(unwrap_or(pg_valeur(sortie,i,3),"")) + "}"; i = i + 1 }
+    items = items + "]"
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json(items))
+}
+
 fn application(req: Requete) -> WebResultat {
     var methodes: List<Text> = []
     var patrons: List<Text> = []
@@ -66,7 +165,12 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "GET", "/api/health", api_sante)
     route_type(methodes, patrons, handlers, "GET", "/api/capacites", api_capacites)
     route_type(methodes, patrons, handlers, "POST", "/api/auth/register", api_register)
+    route_type(methodes, patrons, handlers, "POST", "/api/auth/login", api_login)
     route_type(methodes, patrons, handlers, "POST", "/api/chat", api_chat)
+    route_type(methodes, patrons, handlers, "GET", "/api/search", api_search)
+    route_type(methodes, patrons, handlers, "GET", "/api/users/me", api_me)
+    route_type(methodes, patrons, handlers, "POST", "/api/documents", api_document)
+    route_type(methodes, patrons, handlers, "GET", "/api/admin/users", api_admin_users)
     route_type(methodes, patrons, handlers, "GET", "/", fn (r: Requete, p: Map<Text>) -> WebResultat { return WebResultat.WebOk(reponse_html(vue_accueil("NolCore", "Nolc natif"))) })
     return routeur_dispatch_type(methodes, patrons, handlers, req)
 }
