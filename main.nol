@@ -187,7 +187,8 @@ fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
     let hash = unwrap_or(pg_valeur(sortie, 0, 3), "")
     let valide = mot_de_passe_verifie(hash, bytes_from_text(unwrap_or(mot, "")))
     if not valide { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Identifiants invalides.", req) }
-    if unwrap_or(pg_valeur(sortie,0,5),"false") != "true" { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(403,"Forbidden","Adresse e-mail non vérifiée.",req) }
+    let verifie = unwrap_or(pg_valeur(sortie,0,5),"false")
+    if verifie != "true" and verifie != "t" { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(403,"Forbidden","Adresse e-mail non vérifiée.",req) }
     let id = unwrap_or(pg_valeur(sortie, 0, 0), "")
     let token = session_signe(unwrap_or(env("NOLIAE_SESSION_SECRET"), ""), id, 86400, maintenant_epoch())
     let cookie = cookie_session(unwrap_or(env("NOLIAE_SESSION_SECRET"), ""), unwrap_or(email,""), ip_requete(req))

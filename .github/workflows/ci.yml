@@ -26,8 +26,7 @@ jobs:
             -v /tmp/nolcore-smtp-certs:/certs nolcore-postfix:ci
           for i in $(seq 1 30); do test -f /tmp/nolcore-smtp-certs/ca.crt && break || sleep 1; done
           sleep 5
-          docker exec nolcore-postfix sh -c "postfix status || true; ps aux; postconf -n | tail -20"
-          docker exec nolcore-postfix sh -c "printf 'QUIT\\r\\n' | openssl s_client -connect smtp-test:465 -servername smtp-test -CAfile /certs/ca.crt -quiet 2>&1 | head -12" || true
+          docker exec nolcore-postfix sh -c "printf 'QUIT\\r\\n' | openssl s_client -connect smtp-test:465 -servername smtp-test -CAfile /certs/ca.crt -quiet 2>/dev/null | head -1 | grep -E '^220'"
           for i in $(seq 1 30); do docker exec nolcore-db pg_isready -U nolcore -d nolcore && break || sleep 1; done
           docker exec nolcore-db psql -U nolcore -d nolcore -c "INSERT INTO smtp_profiles(id,host,port,username,secret_env) VALUES('ci-verify','smtp-test',465,'','CI_SMTP_PASSWORD')"
           docker run -d --rm --name nolcore-smoke --network nolcore-ci -p 8080:8080 \
