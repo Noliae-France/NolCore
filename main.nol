@@ -29,6 +29,15 @@ fn champ_entree(req: Requete, nom: Text) -> Option<Text> {
     return requete_form(req, nom)
 }
 
+fn url_query_brave(v: Text) -> Text {
+    var out = replace(v, "%", "%25")
+    out = replace(out, " ", "%20")
+    out = replace(out, "&", "%26")
+    out = replace(out, "?", "%3F")
+    out = replace(out, "#", "%23")
+    return out
+}
+
 // CORS n'est jamais ouvert à "*" : les applications déployées sont déclarées
 // dans NOLCORE_ALLOWED_ORIGINS, séparées par des virgules. Cela permet de
 // changer de domaine sans modifier ni recompiler le Core.
@@ -284,6 +293,14 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
         i = i + 1
     }
     items = items + "]"
+    // Brave complète l'index privé/crawler lorsque la clé est configurée.
+    let brave_token = unwrap_or(env("NOLCORE_BRAVE_SEARCH_TOKEN"), "")
+    if brave_token != "" {
+        let brave = http_get_token("https://api.search.brave.com/res/v1/web/search?q=" + url_query_brave(unwrap_or(q,"")) + "&count=10&country=FR&search_lang=fr", "X-Subscription-Token " + brave_token)
+        if has(brave) and unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 {
+            items = "{\"crawler\":" + items + ",\"brave\":" + unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"{}" }).corps + "}"
+        }
+    }
     let _audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
     if has(_audit) { pg_liberer(unwrap_or(_audit,ptr_null())) }
     pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))

@@ -235,7 +235,11 @@ fn hc_construire_requete(methode: Text, u: UrlParties, type_contenu: Text, corps
     r += "Host: " + hote_ligne + "\r\n"
     r += "User-Agent: nolc-http-client/1.0\r\n"
     r += "Accept: */*\r\n"
-    if auth != "" { r += "Authorization: Bearer " + auth + "\r\n" }
+    if starts_with(auth, "X-Subscription-Token ") {
+        let token_brave = sub(auth, 21, len(auth))
+        if hc_a_crlf(token_brave) or token_brave == "" { return none }
+        r += "X-Subscription-Token: " + token_brave + "\r\n"
+    } else if auth != "" { r += "Authorization: Bearer " + auth + "\r\n" }
     r += "Connection: close\r\n"
     if corps != "" {
         if type_contenu != "" {
@@ -609,6 +613,13 @@ fn http_get(url: Text) -> Option<ReponseHttp> {
         return none
     }
     return hc_requete_suivie("GET", unwrap_or(u, UrlParties { schema: "http", hote: "", port: 80, chemin: "/" }), "", "", hc_redirections_max(), hc_timeout_defaut_ms(), hc_taille_max_defaut(), "")
+}
+
+// GET authentifié. Le token ne doit provenir que d'une configuration serveur.
+fn http_get_token(url: Text, token: Text) -> Option<ReponseHttp> {
+    let u = url_parse(url)
+    if not has(u) or token == "" { return none }
+    return hc_requete_suivie("GET", unwrap_or(u, UrlParties { schema: "http", hote: "", port: 80, chemin: "/" }), "", "", hc_redirections_max(), hc_timeout_defaut_ms(), hc_taille_max_defaut(), token)
 }
 
 // POST avec corps et type de contenu, suivi de redirection.
