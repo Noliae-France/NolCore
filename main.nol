@@ -215,7 +215,14 @@ fn api_crawler(req: Requete, _params: Map<Text>) -> WebResultat {
     if not has(url) { return erreur_json(422, "Unprocessable Content", "url est obligatoire.", req) }
     let page = crawler_get_respectueux(unwrap_or(url, ""))
     if not has(page) { return erreur_json(403, "Forbidden", "URL refusée par robots.txt ou inaccessible.", req) }
-    return WebResultat.WebOk(reponse_json("{\"url\":" + json_texte(unwrap_or(url,"")) + ",\"content\":" + json_texte(unwrap_or(page,"")) + "}"))
+    let conn = db()
+    if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let saved = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO documents(owner_id,title,content) VALUES($1,$2,$3) RETURNING id", [unwrap_or(id,""), unwrap_or(url,""), unwrap_or(page,"")])
+    if not has(saved) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Indexation impossible.",req) }
+    let result = unwrap_or(saved,ptr_null())
+    let doc_id = unwrap_or(pg_valeur(result,0,0),"")
+    pg_liberer(result); pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"url\":" + json_texte(unwrap_or(url,"")) + ",\"document_id\":" + json_texte(doc_id) + ",\"content\":" + json_texte(unwrap_or(page,"")) + "}"))
 }
 
 fn page_statique(req: Requete, _params: Map<Text>) -> WebResultat {
