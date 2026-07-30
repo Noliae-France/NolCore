@@ -6,6 +6,7 @@ import "../nolc/lib/temps.nol"
 import "../nolc/lib/http_client.nol"
 import "smtp.nol"
 import "auth.nol"
+import "webauthn.nol"
 
 fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
 
@@ -538,6 +539,143 @@ fn api_account_delete(req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json("{\"deleted\":true}"))
 }
 
+// ---------- Passkeys (WebAuthn) ----------
+
+fn wa_rpid() -> Text { return unwrap_or(env("NOLCORE_WEBAUTHN_RPID"), "localhost") }
+fn wa_origin() -> Text { return unwrap_or(env("NOLCORE_WEBAUTHN_ORIGIN"), "http://localhost:8080") }
+
+fn api_passkey_register_begin(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let ob = random_bytes(32)
+    if not has(ob) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Aléa indisponible.",req) }
+    let challenge = base64url_encode(unwrap_or(ob, bytes_new()))
+    let ins = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO webauthn_challenges(challenge,user_id,kind) VALUES($1,$2,'register')", [challenge, unwrap_or(id,"")])
+    if has(ins) { pg_liberer(unwrap_or(ins,ptr_null())) }
+    let ur = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT email,display_name FROM users WHERE id=$1", [unwrap_or(id,"")])
+    var email = ""; var nom = ""
+    if has(ur) { let r = unwrap_or(ur,ptr_null()); if pg_lignes(r)==1 { email = unwrap_or(pg_valeur(r,0,0),""); nom = unwrap_or(pg_valeur(r,0,1),"") } pg_liberer(r) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    let user_id_b64 = base64url_encode(bytes_from_text(unwrap_or(id,"")))
+    let corps = "{\"challenge\":" + json_texte(challenge) + ",\"rp\":{\"id\":" + json_texte(wa_rpid()) + ",\"name\":\"NolCore\"},\"user\":{\"id\":" + json_texte(user_id_b64) + ",\"name\":" + json_texte(email) + ",\"displayName\":" + json_texte(nom) + "},\"pubKeyCredParams\":[{\"type\":\"public-key\",\"alg\":-8}],\"timeout\":60000,\"attestation\":\"none\",\"authenticatorSelection\":{\"residentKey\":\"preferred\",\"userVerification\":\"preferred\"}}"
+    return WebResultat.WebOk(reponse_json(corps))
+}
+
+fn api_passkey_register_finish(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let ocorps = requete_json(req)
+    if not has(ocorps) { return erreur_json(400,"Bad Request","JSON invalide.",req) }
+    let body = unwrap_or(ocorps, "")
+    let cd_b64 = unwrap_or(json_chemin_texte(body, "response.clientDataJSON"), "")
+    let att_b64 = unwrap_or(json_chemin_texte(body, "response.attestationObject"), "")
+    if cd_b64 == "" or att_b64 == "" { return erreur_json(422,"Unprocessable Content","Réponse WebAuthn incomplète.",req) }
+    let cd_bytes = unwrap_or(base64url_decode(cd_b64), bytes_new())
+    let cd_text = unwrap_or(bytes_to_text(cd_bytes), "")
+    if unwrap_or(json_texte_champ(cd_text, "type"),"") != "webauthn.create" { return erreur_json(400,"Bad Request","Type WebAuthn inattendu.",req) }
+    if unwrap_or(json_texte_champ(cd_text, "origin"),"") != wa_origin() { return erreur_json(400,"Bad Request","Origine non autorisée.",req) }
+    let chal = unwrap_or(json_texte_champ(cd_text, "challenge"), "")
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let ch = pg_requete_params(unwrap_or(conn,ptr_null()), "DELETE FROM webauthn_challenges WHERE challenge=$1 AND kind='register' AND user_id=$2 AND expires_at>now() RETURNING challenge", [chal, unwrap_or(id,"")])
+    var chal_ok = false
+    if has(ch) { let r = unwrap_or(ch,ptr_null()); chal_ok = pg_lignes(r)==1; pg_liberer(r) }
+    if not chal_ok { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(400,"Bad Request","Challenge invalide ou expiré.",req) }
+    let att = unwrap_or(base64url_decode(att_b64), bytes_new())
+    let oad = cbor_map_bstr(att, "authData")
+    if not has(oad) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(400,"Bad Request","authData absent.",req) }
+    let ad = unwrap_or(oad, bytes_new())
+    if bit_and(ad_flags(ad), 64) == 0 { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(400,"Bad Request","Aucune credential attestée.",req) }
+    let off = ad_cose_offset(ad)
+    let alg = cose_alg(ad, off)
+    if alg != (0 - 8) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(400,"Bad Request","Algorithme non supporté (utilisez une passkey EdDSA).",req) }
+    let ox = cose_x(ad, off)
+    if not has(ox) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(400,"Bad Request","Clé publique illisible.",req) }
+    let cred_id_b64 = base64url_encode(ad_cred_id(ad))
+    let pk_b64 = base64url_encode(unwrap_or(ox, bytes_new()))
+    let ins2 = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO webauthn_credentials(user_id,credential_id,public_key,alg,sign_count) VALUES($1,$2,$3,$4,$5) ON CONFLICT (credential_id) DO NOTHING RETURNING id", [unwrap_or(id,""), cred_id_b64, pk_b64, text(alg), text(ad_sign_count(ad))])
+    if has(ins2) { pg_liberer(unwrap_or(ins2,ptr_null())) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"registered\":true,\"credential_id\":" + json_texte(cred_id_b64) + "}"))
+}
+
+fn api_passkey_login_begin(req: Requete, _params: Map<Text>) -> WebResultat {
+    let email = champ_entree(req, "email")
+    if not has(email) { return erreur_json(422,"Unprocessable Content","email obligatoire.",req) }
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let ur = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT id FROM users WHERE email=$1", [unwrap_or(email,"")])
+    var uid = ""
+    if has(ur) { let r = unwrap_or(ur,ptr_null()); if pg_lignes(r)==1 { uid = unwrap_or(pg_valeur(r,0,0),"") } pg_liberer(r) }
+    let ob = random_bytes(32)
+    if not has(ob) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Aléa indisponible.",req) }
+    let challenge = base64url_encode(unwrap_or(ob, bytes_new()))
+    var allow = "["
+    if uid != "" {
+        let ins = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO webauthn_challenges(challenge,user_id,kind) VALUES($1,$2,'login')", [challenge, uid])
+        if has(ins) { pg_liberer(unwrap_or(ins,ptr_null())) }
+        let cr = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT credential_id FROM webauthn_credentials WHERE user_id=$1", [uid])
+        if has(cr) { let r = unwrap_or(cr,ptr_null()); var i = 0; while i < pg_lignes(r) { if i>0 { allow += "," } allow += "{\"type\":\"public-key\",\"id\":" + json_texte(unwrap_or(pg_valeur(r,i,0),"")) + "}"; i = i + 1 } pg_liberer(r) }
+    } else {
+        let ins = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO webauthn_challenges(challenge,user_id,kind) VALUES($1,NULL,'login')", [challenge])
+        if has(ins) { pg_liberer(unwrap_or(ins,ptr_null())) }
+    }
+    allow += "]"
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"challenge\":" + json_texte(challenge) + ",\"rpId\":" + json_texte(wa_rpid()) + ",\"allowCredentials\":" + allow + ",\"userVerification\":\"preferred\",\"timeout\":60000}"))
+}
+
+fn api_passkey_login_finish(req: Requete, _params: Map<Text>) -> WebResultat {
+    let ocorps = requete_json(req)
+    if not has(ocorps) { return erreur_json(400,"Bad Request","JSON invalide.",req) }
+    let body = unwrap_or(ocorps, "")
+    let cred_id = unwrap_or(json_texte_champ(body, "id"), "")
+    let cd_b64 = unwrap_or(json_chemin_texte(body, "response.clientDataJSON"), "")
+    let adata_b64 = unwrap_or(json_chemin_texte(body, "response.authenticatorData"), "")
+    let sig_b64 = unwrap_or(json_chemin_texte(body, "response.signature"), "")
+    if cred_id == "" or cd_b64 == "" or adata_b64 == "" or sig_b64 == "" { return erreur_json(422,"Unprocessable Content","Réponse WebAuthn incomplète.",req) }
+    let cd_bytes = unwrap_or(base64url_decode(cd_b64), bytes_new())
+    let cd_text = unwrap_or(bytes_to_text(cd_bytes), "")
+    if unwrap_or(json_texte_champ(cd_text,"type"),"") != "webauthn.get" or unwrap_or(json_texte_champ(cd_text,"origin"),"") != wa_origin() { return erreur_json(400,"Bad Request","Contexte WebAuthn invalide.",req) }
+    let chal = unwrap_or(json_texte_champ(cd_text, "challenge"), "")
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let cr = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT user_id,public_key FROM webauthn_credentials WHERE credential_id=$1", [cred_id])
+    if not has(cr) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(401,"Unauthorized","Credential inconnue.",req) }
+    let rr = unwrap_or(cr,ptr_null())
+    if pg_lignes(rr) != 1 { pg_liberer(rr); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(401,"Unauthorized","Credential inconnue.",req) }
+    let uid = unwrap_or(pg_valeur(rr,0,0),"")
+    let pk_b64 = unwrap_or(pg_valeur(rr,0,1),"")
+    pg_liberer(rr)
+    let ch = pg_requete_params(unwrap_or(conn,ptr_null()), "DELETE FROM webauthn_challenges WHERE challenge=$1 AND kind='login' AND (user_id=$2 OR user_id IS NULL) AND expires_at>now() RETURNING challenge", [chal, uid])
+    var chal_ok = false
+    if has(ch) { let r = unwrap_or(ch,ptr_null()); chal_ok = pg_lignes(r) >= 1; pg_liberer(r) }
+    if not chal_ok { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(400,"Bad Request","Challenge invalide ou expiré.",req) }
+    let pk = unwrap_or(base64url_decode(pk_b64), bytes_new())
+    let ad_bytes = unwrap_or(base64url_decode(adata_b64), bytes_new())
+    let sig = unwrap_or(base64url_decode(sig_b64), bytes_new())
+    if not webauthn_verifie_ed25519(pk, ad_bytes, cd_bytes, sig) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(401,"Unauthorized","Signature invalide.",req) }
+    let up = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE webauthn_credentials SET sign_count=$1 WHERE credential_id=$2", [text(ad_sign_count(ad_bytes)), cred_id])
+    if has(up) { pg_liberer(unwrap_or(up,ptr_null())) }
+    let ur = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT email FROM users WHERE id=$1", [uid])
+    var email = ""
+    if has(ur) { let r = unwrap_or(ur,ptr_null()); if pg_lignes(r)==1 { email = unwrap_or(pg_valeur(r,0,0),"") } pg_liberer(r) }
+    let token = session_signe(unwrap_or(env("NOLIAE_SESSION_SECRET"), ""), uid, 86400, maintenant_epoch())
+    let cookie = cookie_session(unwrap_or(env("NOLIAE_SESSION_SECRET"), ""), email, ip_requete(req))
+    if has(cookie) {
+        let cookie_hash = hmac_sha256_hex(bytes_from_text(unwrap_or(env("NOLIAE_SESSION_SECRET"), "")), bytes_from_text(unwrap_or(cookie,"")))
+        let session_id = random_hex(16)
+        if has(session_id) and has(token) {
+            let bearer_hash = hmac_sha256_hex(bytes_from_text(unwrap_or(env("NOLIAE_SESSION_SECRET"), "")), bytes_from_text(unwrap_or(token,"")))
+            let ss = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO user_sessions(session_id,token_hash,bearer_token_hash,user_id,email,ip,user_agent,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()+interval '24 hours')", [unwrap_or(session_id,""),cookie_hash,bearer_hash,uid,email,ip_requete(req),unwrap_or(requete_entete(req,"User-Agent"),"")])
+            if has(ss) { pg_liberer(unwrap_or(ss,ptr_null())) }
+        }
+    }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    if not has(token) { return erreur_json(500,"Internal Server Error","Session indisponible.",req) }
+    var rep = reponse_json("{\"token\":" + json_texte(unwrap_or(token,"")) + ",\"user_id\":" + json_texte(uid) + "}")
+    if has(cookie) { rep = reponse_cookie_domaine(rep, "nol_session", unwrap_or(cookie,""), 86400, true, lower(unwrap_or(env("NOLIAE_COOKIE_SECURE"),"false")) == "true", "Lax", unwrap_or(env("NOLIAE_COOKIE_DOMAIN"),"")) }
+    return WebResultat.WebOk(rep)
+}
+
 fn api_document(req: Requete, _params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
     if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
@@ -922,6 +1060,10 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "POST", "/v1/auth/totp/disable", api_totp_disable)
     route_type(methodes, patrons, handlers, "GET", "/v1/account/export", api_account_export)
     route_type(methodes, patrons, handlers, "POST", "/v1/account/delete", api_account_delete)
+    route_type(methodes, patrons, handlers, "POST", "/v1/auth/passkey/register/begin", api_passkey_register_begin)
+    route_type(methodes, patrons, handlers, "POST", "/v1/auth/passkey/register/finish", api_passkey_register_finish)
+    route_type(methodes, patrons, handlers, "POST", "/v1/auth/passkey/login/begin", api_passkey_login_begin)
+    route_type(methodes, patrons, handlers, "POST", "/v1/auth/passkey/login/finish", api_passkey_login_finish)
     route_type(methodes, patrons, handlers, "DELETE", "/v1/user/me/sessions/:session_id", api_user_session_revoke)
     route_type(methodes, patrons, handlers, "POST", "/v1/user/me/sessions/revoke-all", api_user_sessions_revoke_all)
     route_type(methodes, patrons, handlers, "POST", "/v1/user/resetpassword", api_user_reset)

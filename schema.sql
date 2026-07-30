@@ -38,3 +38,6 @@ INSERT INTO permissions(code,description) VALUES ('users.read','Lire les utilisa
 ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS user_agent TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS webauthn_credentials (id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, credential_id TEXT UNIQUE NOT NULL, public_key TEXT NOT NULL, alg INTEGER NOT NULL, sign_count BIGINT NOT NULL DEFAULT 0, label TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS webauthn_credentials_user_idx ON webauthn_credentials(user_id);
+CREATE TABLE IF NOT EXISTS webauthn_challenges (challenge TEXT PRIMARY KEY, user_id BIGINT, kind TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '5 minutes');
