@@ -399,7 +399,12 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     let offset = (page - 1) * limit
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
-    let cle_rate = unwrap_or(requete_entete(req, "X-Forwarded-For"), "anonymous")
+    // Cette route exige déjà une authentification (id ci-dessus) : on clé le
+    // débit sur l'utilisateur réel, pas sur X-Forwarded-For. Ce dernier n'est
+    // actuellement PAS transmis par le WAF (toujours vide) ; le garder comme
+    // clé aurait fait partager un seul quota global à tous les utilisateurs
+    // anonymes/authentifiés confondus (déni de service mutuel).
+    let cle_rate = unwrap_or(id, "anonymous")
     // Anti-abus DISTRIBUÉ via Redis (partagé entre répliques), avec repli sur
     // le comptage PostgreSQL si Redis est indisponible (fail-open).
     let rl = redis_rate_ok("search:" + cle_rate, 60, 60)
@@ -636,7 +641,18 @@ fn api_account_delete(req: Requete, _params: Map<Text>) -> WebResultat {
 // ---------- Passkeys (WebAuthn) ----------
 
 fn wa_rpid() -> Text { return unwrap_or(env("NOLCORE_WEBAUTHN_RPID"), "localhost") }
-fn wa_origin() -> Text { return unwrap_or(env("NOLCORE_WEBAUTHN_ORIGIN"), "http://localhost:8080") }
+// L'enregistrement d'une passkey se fait depuis account.<domaine> et la
+// connexion depuis login.<domaine> : ce sont deux ORIGINES DIFFÉRENTES.
+// Une seule origine configurée rejetterait systématiquement l'une des deux
+// cérémonies WebAuthn. NOLCORE_WEBAUTHN_ORIGINS : liste séparée par des
+// virgules (repli sur NOLCORE_WEBAUTHN_ORIGIN pour compatibilité).
+fn wa_origine_valide(origine: Text) -> Bool {
+    let liste = unwrap_or(env("NOLCORE_WEBAUTHN_ORIGINS"), unwrap_or(env("NOLCORE_WEBAUTHN_ORIGIN"), "http://localhost:8080"))
+    for candidate in split(liste, ",") {
+        if trim(candidate) == origine { return true }
+    }
+    return false
+}
 
 fn api_passkey_register_begin(req: Requete, _params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
@@ -668,7 +684,7 @@ fn api_passkey_register_finish(req: Requete, _params: Map<Text>) -> WebResultat 
     let cd_bytes = unwrap_or(base64url_decode(cd_b64), bytes_new())
     let cd_text = unwrap_or(bytes_to_text(cd_bytes), "")
     if unwrap_or(json_texte_champ(cd_text, "type"),"") != "webauthn.create" { return erreur_json(400,"Bad Request","Type WebAuthn inattendu.",req) }
-    if unwrap_or(json_texte_champ(cd_text, "origin"),"") != wa_origin() { return erreur_json(400,"Bad Request","Origine non autorisée.",req) }
+    if not wa_origine_valide(unwrap_or(json_texte_champ(cd_text, "origin"),"")) { return erreur_json(400,"Bad Request","Origine non autorisée.",req) }
     let chal = unwrap_or(json_texte_champ(cd_text, "challenge"), "")
     let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
     let ch = pg_requete_params(unwrap_or(conn,ptr_null()), "DELETE FROM webauthn_challenges WHERE challenge=$1 AND kind='register' AND user_id=$2 AND expires_at>now() RETURNING challenge", [chal, unwrap_or(id,"")])
@@ -729,7 +745,7 @@ fn api_passkey_login_finish(req: Requete, _params: Map<Text>) -> WebResultat {
     if cred_id == "" or cd_b64 == "" or adata_b64 == "" or sig_b64 == "" { return erreur_json(422,"Unprocessable Content","Réponse WebAuthn incomplète.",req) }
     let cd_bytes = unwrap_or(base64url_decode(cd_b64), bytes_new())
     let cd_text = unwrap_or(bytes_to_text(cd_bytes), "")
-    if unwrap_or(json_texte_champ(cd_text,"type"),"") != "webauthn.get" or unwrap_or(json_texte_champ(cd_text,"origin"),"") != wa_origin() { return erreur_json(400,"Bad Request","Contexte WebAuthn invalide.",req) }
+    if unwrap_or(json_texte_champ(cd_text,"type"),"") != "webauthn.get" or not wa_origine_valide(unwrap_or(json_texte_champ(cd_text,"origin"),"")) { return erreur_json(400,"Bad Request","Contexte WebAuthn invalide.",req) }
     let chal = unwrap_or(json_texte_champ(cd_text, "challenge"), "")
     let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
     let cr = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT user_id,public_key FROM webauthn_credentials WHERE credential_id=$1", [cred_id])
