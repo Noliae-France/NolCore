@@ -890,6 +890,27 @@ fn core_ia_stream(client: Int, raw: Text) {
     let texte = unwrap_or(json_texte_champ(body_in, "text"), "")
     var texte_aug = texte
     var usage_id = ""
+    // Contexte injecté dans le prompt : pièces jointes (éphémères, lues côté
+    // client et transmises dans la requête) puis documents (RAG, plus bas).
+    var contexte = ""
+    let pj = json_chemin(body_in, "attachments")
+    if has(pj) {
+        let arr = unwrap_or(pj, "[]")
+        var j = 0
+        while j < 3 {
+            let el = json_element_a(arr, j)
+            if not has(el) {
+                j = 3
+            } else {
+                let obj = unwrap_or(el, "")
+                let nom = unwrap_or(json_texte_champ(obj, "name"), "fichier")
+                var cont = unwrap_or(json_texte_champ(obj, "content"), "")
+                if len(cont) > 4000 { cont = sub(cont, 0, 4000) }
+                if cont != "" { contexte = contexte + "Pièce jointe « " + nom + " » :\n" + cont + "\n\n" }
+                j = j + 1
+            }
+        }
+    }
     // Quota horaire + RAG (documents de l'utilisateur) + ligne ai_usage.
     let conn = db()
     if has(conn) {
@@ -917,7 +938,7 @@ fn core_ia_stream(client: Int, raw: Text) {
                     ctx = ctx + "- " + unwrap_or(pg_valeur(rr, k, 0), "") + " : " + contenu + "\n"
                     k = k + 1
                 }
-                texte_aug = "Contexte tiré des documents de l'utilisateur (utilise-le s'il est pertinent) :\n" + ctx + "\nQuestion : " + texte
+                contexte = contexte + "Documents de l'utilisateur (utilise-les s'ils sont pertinents) :\n" + ctx + "\n"
             }
             pg_liberer(rr)
         }
@@ -925,7 +946,8 @@ fn core_ia_stream(client: Int, raw: Text) {
         if has(_rec) { usage_id = unwrap_or(pg_valeur(unwrap_or(_rec, ptr_null()), 0, 0), ""); pg_liberer(unwrap_or(_rec, ptr_null())) }
         pg_fermer(unwrap_or(conn, ptr_null()))
     }
-    // Corps augmenté (RAG) envoyé au service IA.
+    // Corps augmenté (pièces jointes + RAG) envoyé au service IA.
+    if contexte != "" { texte_aug = contexte + "\nQuestion : " + texte }
     let body_out = "{\"provider\":" + json_texte(prov) + ",\"model\":" + json_texte(modl) + ",\"text\":" + json_texte(texte_aug) + "}"
     // En-têtes SSE vers le navigateur.
     let _h = tcp_write(client, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n")
