@@ -7,6 +7,7 @@ import "../nolc/lib/http_client.nol"
 import "smtp.nol"
 import "auth.nol"
 import "webauthn.nol"
+import "redis.nol"
 
 fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
 
@@ -322,6 +323,42 @@ fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(rep)
 }
 
+// Limitation de débit DISTRIBUÉE via Redis (partagée entre répliques).
+// Retourne none si Redis est indisponible (l'appelant retombe alors sur le
+// comptage PostgreSQL), some(true) si sous la limite, some(false) si dépassée.
+fn redis_rate_ok(cle: Text, limite: Int, fenetre: Int) -> Option<Bool> {
+    let oc = redis_env()
+    if not has(oc) { return none }
+    let fd = unwrap_or(oc, -1)
+    let n = redis_incr(fd, "rl:" + cle)
+    var res: Option<Bool> = none
+    if has(n) {
+        if unwrap_or(n, 0) == 1 { let _e = redis_expire(fd, "rl:" + cle, fenetre) }
+        res = some(unwrap_or(n, 0) <= limite)
+    }
+    redis_fermer(fd)
+    return res
+}
+
+// Cache de recherche partagé (lecture). none = absent, désactivé ou erreur.
+fn cache_get(cle: Text) -> Option<Text> {
+    let oc = redis_env()
+    if not has(oc) { return none }
+    let fd = unwrap_or(oc, -1)
+    let v = redis_get(fd, "sc:" + cle)
+    redis_fermer(fd)
+    return v
+}
+
+// Cache de recherche partagé (écriture, best-effort).
+fn cache_set(cle: Text, ttl: Int, valeur: Text) {
+    let oc = redis_env()
+    if not has(oc) { return }
+    let fd = unwrap_or(oc, -1)
+    let _s = redis_setex(fd, "sc:" + cle, ttl, valeur)
+    redis_fermer(fd)
+}
+
 fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
     let id = utilisateur(req, secret)
@@ -336,10 +373,24 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
     let cle_rate = unwrap_or(requete_entete(req, "X-Forwarded-For"), "anonymous")
-    let rate = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT count(*) FROM audit_logs WHERE action='search' AND metadata->>'key'=$1 AND created_at > now() - interval '1 minute'", [cle_rate])
-    if has(rate) and unwrap_or(parse_int(unwrap_or(pg_valeur(unwrap_or(rate,ptr_null()),0,0),"0")),0) >= 60 { pg_liberer(unwrap_or(rate,ptr_null())); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(429,"Too Many Requests","Limite de recherche atteinte, réessayez dans une minute.",req) }
-    if has(rate) { pg_liberer(unwrap_or(rate,ptr_null())) }
-    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,title,content FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank(search_vector, plainto_tsquery('french',$2)) DESC LIMIT $3 OFFSET $4", [unwrap_or(id, ""), unwrap_or(q, ""),text(limit),text(offset)])
+    // Anti-abus DISTRIBUÉ via Redis (partagé entre répliques), avec repli sur
+    // le comptage PostgreSQL si Redis est indisponible (fail-open).
+    let rl = redis_rate_ok("search:" + cle_rate, 60, 60)
+    if has(rl) {
+        if not unwrap_or(rl, true) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(429, "Too Many Requests", "Limite de recherche atteinte, réessayez dans une minute.", req) }
+    } else {
+        let rate = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT count(*) FROM audit_logs WHERE action='search' AND metadata->>'key'=$1 AND created_at > now() - interval '1 minute'", [cle_rate])
+        if has(rate) and unwrap_or(parse_int(unwrap_or(pg_valeur(unwrap_or(rate,ptr_null()),0,0),"0")),0) >= 60 { pg_liberer(unwrap_or(rate,ptr_null())); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(429,"Too Many Requests","Limite de recherche atteinte, réessayez dans une minute.",req) }
+        if has(rate) { pg_liberer(unwrap_or(rate,ptr_null())) }
+    }
+    // Cache de recherche partagé : clé par (utilisateur, page, limite, requête).
+    let cle_cache = unwrap_or(id, "") + ":" + text(page) + ":" + text(limit) + ":" + sub(sha256_hex(bytes_from_text(unwrap_or(q, ""))), 0, 16)
+    let cached = cache_get(cle_cache)
+    if has(cached) {
+        pg_fermer(unwrap_or(conn, ptr_null()))
+        return WebResultat.WebOk(reponse_avec_entete(reponse_json(unwrap_or(cached, "[]")), "X-Cache", "HIT"))
+    }
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,title,content, count(*) OVER() AS total FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank_cd(search_vector, plainto_tsquery('french',$2)) DESC LIMIT $3 OFFSET $4", [unwrap_or(id, ""), unwrap_or(q, ""),text(limit),text(offset)])
     if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
     let sortie = unwrap_or(res, ptr_null())
     var items = "["
@@ -350,10 +401,12 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
         i = i + 1
     }
     items = items + "]"
+    var total_priv = 0
+    if pg_lignes(sortie) > 0 { total_priv = unwrap_or(parse_int(unwrap_or(pg_valeur(sortie, 0, 3), "0")), 0) }
     // Sans document privé, consulter l'index public construit par le crawler.
     if pg_lignes(sortie) == 0 {
         pg_liberer(sortie)
-        let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,content,'crawler' AS source FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank(search_vector,plainto_tsquery('french',$1)) DESC, crawled_at DESC LIMIT $2 OFFSET $3", [unwrap_or(q, ""),text(limit),text(offset)])
+        let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,content,'crawler' AS source, count(*) OVER() AS total FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank_cd(search_vector,plainto_tsquery('french',$1)) DESC, crawled_at DESC LIMIT $2 OFFSET $3", [unwrap_or(q, ""),text(limit),text(offset)])
         if not has(public_res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
         let public_sortie = unwrap_or(public_res, ptr_null())
         items = "["
@@ -364,6 +417,8 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
             i = i + 1
         }
         items = items + "]"
+        var total_public = 0
+        if pg_lignes(public_sortie) > 0 { total_public = unwrap_or(parse_int(unwrap_or(pg_valeur(public_sortie, 0, 5), "0")), 0) }
         // Premier passage : Brave répond tout de suite et ses URL sont mises
         // en file. Les passages suivants trouvent l'index local du crawler.
         if pg_lignes(public_sortie) == 0 {
@@ -379,13 +434,25 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
         }
         let _public_audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','public_search_documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
         if has(_public_audit) { pg_liberer(unwrap_or(_public_audit,ptr_null())) }
+        if items != "[]" { cache_set(cle_cache, 30, items) }
+        var tp_pub = 0
+        if limit > 0 { tp_pub = (total_public + limit - 1) / limit }
+        var rep_pub = reponse_avec_entete(reponse_json(items), "X-Cache", "MISS")
+        rep_pub = reponse_avec_entete(rep_pub, "X-Total-Count", text(total_public))
+        rep_pub = reponse_avec_entete(rep_pub, "X-Total-Pages", text(tp_pub))
         pg_liberer(public_sortie); pg_fermer(unwrap_or(conn, ptr_null()))
-        return WebResultat.WebOk(reponse_json(items))
+        return WebResultat.WebOk(rep_pub)
     }
     let _audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
     if has(_audit) { pg_liberer(unwrap_or(_audit,ptr_null())) }
+    if items != "[]" { cache_set(cle_cache, 30, items) }
+    var tp_priv = 0
+    if limit > 0 { tp_priv = (total_priv + limit - 1) / limit }
+    var rep_priv = reponse_avec_entete(reponse_json(items), "X-Cache", "MISS")
+    rep_priv = reponse_avec_entete(rep_priv, "X-Total-Count", text(total_priv))
+    rep_priv = reponse_avec_entete(rep_priv, "X-Total-Pages", text(tp_priv))
     pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
-    return WebResultat.WebOk(reponse_json(items))
+    return WebResultat.WebOk(rep_priv)
 }
 
 fn api_me(req: Requete, _params: Map<Text>) -> WebResultat {
@@ -1091,6 +1158,183 @@ fn application(req: Requete) -> WebResultat {
     return routeur_dispatch_type(methodes, patrons, handlers, req)
 }
 
+// Corps (JSON) d'une requête HTTP brute.
+fn ia_corps(raw: Text) -> Text {
+    let sep = find(raw, "\r\n\r\n")
+    if not has(sep) { return "" }
+    return sub(raw, unwrap_or(sep, 0) + 4, len(raw))
+}
+
+// Coût estimé en micro-euros à partir des tokens et des tarifs par fournisseur.
+fn ia_cout_core(provider: Text, entree: Int, sortie: Int) -> Int {
+    let prefix = "NOLCORE_" + upper(provider)
+    let in_rate = unwrap_or(parse_int(unwrap_or(env(prefix + "_INPUT_MICROS_PER_1K"), "0")), 0)
+    let out_rate = unwrap_or(parse_int(unwrap_or(env(prefix + "_OUTPUT_MICROS_PER_1K"), "0")), 0)
+    return (entree * in_rate) / 1000 + (sortie * out_rate) / 1000
+}
+
+// Lit l'entier qui suit `cle` dans `texte` (ex. cle = "\"in\":" -> 123).
+fn nombre_apres(texte: Text, cle: Text) -> Int {
+    let m = find(texte, cle)
+    if not has(m) { return 0 }
+    var i = unwrap_or(m, 0) + len(cle)
+    var n = ""
+    var stop = false
+    while i < len(texte) and not stop {
+        let c = char_at(texte, i)
+        if has(find("0123456789", c)) { n = n + c; i = i + 1 } else { stop = true }
+    }
+    return unwrap_or(parse_int(n), 0)
+}
+
+// Proxy SSE : authentifie, applique le quota horaire, puis RELAIE le flux
+// token-par-token du service NolCore-IA (/v1/ia/stream) vers le navigateur.
+// Écrit directement dans le socket `client` et le ferme. Fail-safe.
+fn core_ia_stream(client: Int, raw: Text) {
+    let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
+    var uid: Option<Text> = none
+    match http_analyser(raw, 65536, 1048576) {
+        Complet(rq) => { uid = utilisateur(rq, secret) }
+        Erreur(_c) => {}
+        Incomplet => {}
+    }
+    if not has(uid) {
+        let _e = tcp_write(client, "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Authentification requise\"}")
+        tcp_close(client); return
+    }
+    let body_in = ia_corps(raw)
+    let prov = unwrap_or(json_texte_champ(body_in, "provider"), "")
+    let modl = unwrap_or(json_texte_champ(body_in, "model"), "")
+    let texte = unwrap_or(json_texte_champ(body_in, "text"), "")
+    var texte_aug = texte
+    var usage_id = ""
+    // Contexte injecté dans le prompt : pièces jointes (éphémères, lues côté
+    // client et transmises dans la requête) puis documents (RAG, plus bas).
+    var contexte = ""
+    let pj = json_chemin(body_in, "attachments")
+    if has(pj) {
+        let arr = unwrap_or(pj, "[]")
+        var j = 0
+        while j < 3 {
+            let el = json_element_a(arr, j)
+            if not has(el) {
+                j = 3
+            } else {
+                let obj = unwrap_or(el, "")
+                let nom = unwrap_or(json_texte_champ(obj, "name"), "fichier")
+                var cont = unwrap_or(json_texte_champ(obj, "content"), "")
+                if len(cont) > 4000 { cont = sub(cont, 0, 4000) }
+                if cont != "" { contexte = contexte + "Pièce jointe « " + nom + " » :\n" + cont + "\n\n" }
+                j = j + 1
+            }
+        }
+    }
+    // Quota horaire + RAG (documents de l'utilisateur) + ligne ai_usage.
+    let conn = db()
+    if has(conn) {
+        let quota = unwrap_or(parse_int(unwrap_or(env("NOLCORE_AI_HOURLY_LIMIT"), "40")), 40)
+        let usage = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT count(*) FROM ai_usage WHERE user_id=$1 AND created_at > now()-interval '1 hour'", [unwrap_or(uid, "")])
+        if has(usage) {
+            let n = unwrap_or(parse_int(unwrap_or(pg_valeur(unwrap_or(usage, ptr_null()), 0, 0), "0")), 0)
+            pg_liberer(unwrap_or(usage, ptr_null()))
+            if n >= quota {
+                pg_fermer(unwrap_or(conn, ptr_null()))
+                let _q = tcp_write(client, "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Quota IA horaire atteint\"}")
+                tcp_close(client); return
+            }
+        }
+        // RAG : injecte le contenu des documents pertinents de l'utilisateur.
+        let rag = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT title,content FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank(search_vector,plainto_tsquery('french',$2)) DESC LIMIT 3", [unwrap_or(uid, ""), texte])
+        if has(rag) {
+            let rr = unwrap_or(rag, ptr_null())
+            if pg_lignes(rr) > 0 {
+                var ctx = ""
+                var k = 0
+                while k < pg_lignes(rr) {
+                    var contenu = unwrap_or(pg_valeur(rr, k, 1), "")
+                    if len(contenu) > 800 { contenu = sub(contenu, 0, 800) }
+                    ctx = ctx + "- " + unwrap_or(pg_valeur(rr, k, 0), "") + " : " + contenu + "\n"
+                    k = k + 1
+                }
+                contexte = contexte + "Documents de l'utilisateur (utilise-les s'ils sont pertinents) :\n" + ctx + "\n"
+            }
+            pg_liberer(rr)
+        }
+        let _rec = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO ai_usage(user_id,provider,model,input_chars,output_chars,estimated_cost_micros) VALUES($1,$2,$3,0,0,0) RETURNING id", [unwrap_or(uid, ""), prov, modl])
+        if has(_rec) { usage_id = unwrap_or(pg_valeur(unwrap_or(_rec, ptr_null()), 0, 0), ""); pg_liberer(unwrap_or(_rec, ptr_null())) }
+        pg_fermer(unwrap_or(conn, ptr_null()))
+    }
+    // Corps augmenté (pièces jointes + RAG) envoyé au service IA.
+    if contexte != "" { texte_aug = contexte + "\nQuestion : " + texte }
+    let body_out = "{\"provider\":" + json_texte(prov) + ",\"model\":" + json_texte(modl) + ",\"text\":" + json_texte(texte_aug) + "}"
+    // En-têtes SSE vers le navigateur.
+    let _h = tcp_write(client, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n")
+    let ourl = url_parse(unwrap_or(env("NOLCORE_IA_URL"), ""))
+    if not has(ourl) { let _e = tcp_write(client, "data: {\"error\":\"service IA non configuré\"}\n\ndata: [DONE]\n\n"); tcp_close(client); return }
+    let u = unwrap_or(ourl, UrlParties { schema: "", hote: "", port: 0, chemin: "" })
+    let co = tcp_connect(u.hote, u.port)
+    if not has(co) { let _e = tcp_write(client, "data: {\"error\":\"service IA injoignable\"}\n\ndata: [DONE]\n\n"); tcp_close(client); return }
+    let iafd = unwrap_or(co, -1)
+    tcp_set_timeout(iafd, 60000)
+    let reqia = "POST /v1/ia/stream HTTP/1.1\r\nHost: " + u.hote + "\r\nContent-Type: application/json\r\nContent-Length: " + text(len(body_out)) + "\r\nConnection: close\r\n\r\n" + body_out
+    let _s = tcp_write(iafd, reqia)
+    // Relais LIGNE-À-LIGNE : on transmet tout au navigateur, sauf la ligne
+    // interne « nolcore_usage » dont on extrait les tokens réels.
+    var buf = ""
+    var entetes_finies = false
+    var fini = false
+    var tours = 0
+    var usage_in = 0
+    var usage_out = 0
+    while not fini and tours < 200000 {
+        let m = tcp_read(iafd)
+        if not has(m) {
+            fini = true
+        } else {
+            let ch = unwrap_or(m, "")
+            if ch == "" {
+                fini = true
+            } else {
+                buf = buf + ch
+                if not entetes_finies {
+                    let sep = find(buf, "\r\n\r\n")
+                    if has(sep) { buf = sub(buf, unwrap_or(sep, 0) + 4, len(buf)); entetes_finies = true }
+                }
+                if entetes_finies {
+                    var nl = find(buf, "\n")
+                    while has(nl) {
+                        let i = unwrap_or(nl, 0)
+                        let ligne = sub(buf, 0, i + 1)
+                        buf = sub(buf, i + 1, len(buf))
+                        let lt = trim(ligne)
+                        if starts_with(lt, "data: {\"nolcore_usage\"") {
+                            usage_in = nombre_apres(lt, "\"in\":")
+                            usage_out = nombre_apres(lt, "\"out\":")
+                        } else {
+                            let _w = tcp_write(client, ligne)
+                        }
+                        nl = find(buf, "\n")
+                    }
+                }
+            }
+        }
+        tours = tours + 1
+    }
+    if entetes_finies and buf != "" { let _wr = tcp_write(client, buf) }
+    tcp_close(iafd)
+    tcp_close(client)
+    // Comptabilisation exacte : met à jour la ligne ai_usage insérée.
+    if usage_id != "" and (usage_in > 0 or usage_out > 0) {
+        let cout = ia_cout_core(prov, usage_in, usage_out)
+        let conn2 = db()
+        if has(conn2) {
+            let _upd = pg_requete_params(unwrap_or(conn2, ptr_null()), "UPDATE ai_usage SET input_chars=$1,output_chars=$2,estimated_cost_micros=$3 WHERE id=$4", [text(usage_in), text(usage_out), text(cout), usage_id])
+            if has(_upd) { pg_liberer(unwrap_or(_upd, ptr_null())) }
+            pg_fermer(unwrap_or(conn2, ptr_null()))
+        }
+    }
+}
+
 fn main() {
     let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
     if len(secret) < 32 { print("NOLIAE_SESSION_SECRET doit contenir au moins 32 caracteres"); return }
@@ -1110,9 +1354,13 @@ fn main() {
         if has(venu) {
             let client = unwrap_or(venu, -1)
             let requete = lire_requete_http_complete(client, limites)
-            let reponse = web_repondre_resultat_pre(requete, limites, application, pre, post)
-            let _ecrit = tcp_write(client, reponse)
-            tcp_close(client)
+            if starts_with(requete, "POST /v1/ia/stream") {
+                core_ia_stream(client, requete)
+            } else {
+                let reponse = web_repondre_resultat_pre(requete, limites, application, pre, post)
+                let _ecrit = tcp_write(client, reponse)
+                tcp_close(client)
+            }
         }
     }
 }

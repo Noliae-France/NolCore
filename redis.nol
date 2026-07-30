@@ -1,0 +1,173 @@
+// Client Redis (RESP2) minimal pour NolCore, au-dessus des sockets TCP.
+// Copyright Bastien LANGUEDOC.
+//
+// Objectif : cache et compteurs PARTAGES entre les répliques de l'API
+// (cache de recherche, limitation de débit distribuée). Contrairement à un
+// cache mémoire in-process, Redis est vu par toutes les instances.
+//
+// Conçu FAIL-OPEN : toute erreur (connexion refusée, timeout, réponse
+// inattendue) rend `none`/`false`. L'appelant doit alors dégrader vers
+// PostgreSQL : la fonctionnalité applicative ne casse jamais si Redis tombe.
+// Pas de TLS ici : Redis est attendu sur un réseau interne privé.
+
+// État d'une réponse RESP en cours d'analyse.
+// etat : 0 = incomplet, 1 = valeur, 2 = nil, 3 = erreur/non géré.
+record RedisRep {
+    etat: Int,
+    valeur: Text
+}
+
+// Encode une commande en RESP2 (tableau de bulk strings). Les longueurs sont
+// en octets (len sur du Text = longueur en octets), donc binaire-sûr.
+fn redis_encoder(args: List<Text>) -> Text {
+    var out = "*" + text(len(args)) + "\r\n"
+    var i = 0
+    while i < len(args) {
+        let a = get(args, i)
+        out = out + "$" + text(len(a)) + "\r\n" + a + "\r\n"
+        i = i + 1
+    }
+    return out
+}
+
+// Analyse UNE réponse RESP depuis le début de `buf`.
+fn redis_parse(buf: Text) -> RedisRep {
+    if len(buf) < 1 {
+        return RedisRep { etat: 0, valeur: "" }
+    }
+    let t = char_at(buf, 0)
+    let nl = find(buf, "\r\n")
+    if not has(nl) {
+        return RedisRep { etat: 0, valeur: "" }
+    }
+    let fin = unwrap_or(nl, 0)
+    let ligne = sub(buf, 1, fin)
+    if t == "+" {
+        return RedisRep { etat: 1, valeur: ligne }
+    }
+    if t == ":" {
+        return RedisRep { etat: 1, valeur: ligne }
+    }
+    if t == "-" {
+        return RedisRep { etat: 3, valeur: ligne }
+    }
+    if t == "$" {
+        let n = unwrap_or(parse_int(ligne), -1)
+        if n < 0 {
+            return RedisRep { etat: 2, valeur: "" }
+        }
+        let debut = fin + 2
+        if len(buf) < debut + n + 2 {
+            return RedisRep { etat: 0, valeur: "" }
+        }
+        return RedisRep { etat: 1, valeur: sub(buf, debut, debut + n) }
+    }
+    // Tableaux et types non utilisés : non gérés (fail-open).
+    return RedisRep { etat: 3, valeur: "" }
+}
+
+// Lit une réponse complète sur `fd`. Accumule les morceaux TCP jusqu'à
+// pouvoir analyser une réponse. none si nil, erreur, ou souci de lecture.
+fn redis_lire(fd: Int) -> Option<Text> {
+    var buf = ""
+    var tours = 0
+    while tours < 256 {
+        let r = redis_parse(buf)
+        if r.etat == 1 {
+            return some(r.valeur)
+        }
+        if r.etat == 2 or r.etat == 3 {
+            return none
+        }
+        let morceau = tcp_read(fd)
+        if not has(morceau) {
+            return none
+        }
+        let m = unwrap_or(morceau, "")
+        if m == "" {
+            return none
+        }
+        buf = buf + m
+        tours = tours + 1
+    }
+    return none
+}
+
+// Envoie une commande et lit sa réponse.
+fn redis_cmd(fd: Int, args: List<Text>) -> Option<Text> {
+    if not tcp_write(fd, redis_encoder(args)) {
+        return none
+    }
+    return redis_lire(fd)
+}
+
+// Ouvre une connexion Redis (AUTH et SELECT optionnels). none si injoignable.
+fn redis_ouvrir(hote: Text, port: Int, motdepasse: Text, base: Int) -> Option<Int> {
+    let co = tcp_connect(hote, port)
+    if not has(co) {
+        return none
+    }
+    let fd = unwrap_or(co, -1)
+    tcp_set_timeout(fd, 1500)
+    if motdepasse != "" {
+        if not has(redis_cmd(fd, ["AUTH", motdepasse])) {
+            tcp_close(fd)
+            return none
+        }
+    }
+    if base != 0 {
+        if not has(redis_cmd(fd, ["SELECT", text(base)])) {
+            tcp_close(fd)
+            return none
+        }
+    }
+    return some(fd)
+}
+
+// Ouvre depuis l'environnement. Redis est DÉSACTIVÉ si NOLCORE_REDIS_HOST est
+// vide : l'appelant dégrade alors silencieusement vers PostgreSQL.
+fn redis_env() -> Option<Int> {
+    let hote = unwrap_or(env("NOLCORE_REDIS_HOST"), "")
+    if hote == "" {
+        return none
+    }
+    let port = unwrap_or(parse_int(unwrap_or(env("NOLCORE_REDIS_PORT"), "6379")), 6379)
+    let pass = unwrap_or(env("NOLCORE_REDIS_PASSWORD"), "")
+    let base = unwrap_or(parse_int(unwrap_or(env("NOLCORE_REDIS_DB"), "0")), 0)
+    return redis_ouvrir(hote, port, pass, base)
+}
+
+fn redis_fermer(fd: Int) {
+    tcp_close(fd)
+}
+
+// GET : none si absent (miss) ou erreur.
+fn redis_get(fd: Int, cle: Text) -> Option<Text> {
+    return redis_cmd(fd, ["GET", cle])
+}
+
+// SET cle valeur EX ttl. true si accepté.
+fn redis_setex(fd: Int, cle: Text, ttl: Int, valeur: Text) -> Bool {
+    return has(redis_cmd(fd, ["SET", cle, valeur, "EX", text(ttl)]))
+}
+
+// INCR : nouvelle valeur du compteur, ou none en cas d'erreur.
+fn redis_incr(fd: Int, cle: Text) -> Option<Int> {
+    let r = redis_cmd(fd, ["INCR", cle])
+    if not has(r) {
+        return none
+    }
+    return parse_int(unwrap_or(r, "0"))
+}
+
+fn redis_expire(fd: Int, cle: Text, ttl: Int) -> Bool {
+    return has(redis_cmd(fd, ["EXPIRE", cle, text(ttl)]))
+}
+
+fn redis_del(fd: Int, cle: Text) -> Bool {
+    return has(redis_cmd(fd, ["DEL", cle]))
+}
+
+fn redis_ping(fd: Int) -> Bool {
+    return has(redis_cmd(fd, ["PING"]))
+}

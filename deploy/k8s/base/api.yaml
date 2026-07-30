@@ -47,6 +47,10 @@ spec:
                   key: postgres-password
             - name: NOLCORE_DATABASE_URL
               value: postgres://nolcore:$(POSTGRES_PASSWORD)@postgres:5432/nolcore
+            - name: NOLCORE_REDIS_HOST
+              value: redis
+            - name: NOLCORE_REDIS_PORT
+              value: "6379"
             - name: NOLCORE_CRAWLER_URL
               value: http://nolcore-crawler:8091
             - name: NOLCORE_IA_URL

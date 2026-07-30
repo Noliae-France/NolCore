@@ -4,6 +4,7 @@ namespace: nolcore
 resources:
   - namespace.yaml
   - postgres.yaml
+  - redis.yaml
   - api.yaml
   - services.yaml
   - ingress.yaml
