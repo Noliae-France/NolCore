@@ -197,18 +197,26 @@ fn api_register(req: Requete, _params: Map<Text>) -> WebResultat {
     let saved_token = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO email_verification_tokens(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '24 hours')", [token_hash,id])
     if has(saved_token) { pg_liberer(unwrap_or(saved_token,ptr_null())) }
     let smtp_id = unwrap_or(env("NOLCORE_VERIFICATION_SMTP_ID"),"")
-    if smtp_id != "" {
-        let profile = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT host,port,username,secret_env FROM smtp_profiles WHERE id=$1 AND enabled=true", [smtp_id])
-        if not has(profile) or pg_lignes(unwrap_or(profile,ptr_null())) != 1 { if has(profile) { pg_liberer(unwrap_or(profile,ptr_null())) }; pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(503,"Service Unavailable","SMTP de vérification indisponible.",req) }
-        let p = unwrap_or(profile,ptr_null())
-        let host = unwrap_or(pg_valeur(p,0,0),"")
-        let port = unwrap_or(parse_int(unwrap_or(pg_valeur(p,0,1),"465")),465)
-        let username = unwrap_or(pg_valeur(p,0,2),"")
-        let password = unwrap_or(env(unwrap_or(pg_valeur(p,0,3),"")),"")
-        let from = unwrap_or(env("NOLCORE_VERIFICATION_FROM"),username)
+    if mail_api_disponible() or smtp_id != "" {
         let url = unwrap_or(env("NOLCORE_PUBLIC_URL"),"http://localhost:8080") + "/v1/user/verify?token=" + unwrap_or(token,"")
-        let delivered = smtp_envoyer(host,port,username,password,from,unwrap_or(email,""),"Vérifiez votre compte Noliae","Cliquez ici pour vérifier votre compte : " + url)
-        pg_liberer(p)
+        var delivered = false
+        if mail_api_disponible() {
+            // Prioritaire : la plupart des hébergeurs (dont OVH) bloquent le
+            // SMTP sortant direct depuis un VPS. L'API Mail HTTPS le contourne.
+            let from = unwrap_or(env("NOLCORE_VERIFICATION_FROM"),"no-reply@noliae.com")
+            delivered = mail_api_envoyer(from, unwrap_or(email,""), "Vérifiez votre compte Noliae", "Cliquez ici pour vérifier votre compte : " + url)
+        } else {
+            let profile = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT host,port,username,secret_env FROM smtp_profiles WHERE id=$1 AND enabled=true", [smtp_id])
+            if not has(profile) or pg_lignes(unwrap_or(profile,ptr_null())) != 1 { if has(profile) { pg_liberer(unwrap_or(profile,ptr_null())) }; pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(503,"Service Unavailable","SMTP de vérification indisponible.",req) }
+            let p = unwrap_or(profile,ptr_null())
+            let host = unwrap_or(pg_valeur(p,0,0),"")
+            let port = unwrap_or(parse_int(unwrap_or(pg_valeur(p,0,1),"465")),465)
+            let username = unwrap_or(pg_valeur(p,0,2),"")
+            let password = unwrap_or(env(unwrap_or(pg_valeur(p,0,3),"")),"")
+            let from = unwrap_or(env("NOLCORE_VERIFICATION_FROM"),username)
+            delivered = smtp_envoyer(host,port,username,password,from,unwrap_or(email,""),"Vérifiez votre compte Noliae","Cliquez ici pour vérifier votre compte : " + url)
+            pg_liberer(p)
+        }
         if not delivered { pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(502,"Bad Gateway","Envoi du mail de vérification impossible.",req) }
     }
     let payload = "{\"id\":" + json_texte(id) + ",\"email\":" + json_texte(unwrap_or(email, "")) + ",\"name\":" + json_texte(unwrap_or(nom, "")) + "}"
@@ -892,7 +900,11 @@ fn api_user_reset(req: Requete, _params: Map<Text>) -> WebResultat {
             let old = pg_requete_params(db_conn,"UPDATE password_reset_tokens SET used_at=now() WHERE user_id=$1 AND used_at IS NULL",[user_id]); if has(old) { pg_liberer(unwrap_or(old,ptr_null())) }
             let saved = pg_requete_params(db_conn,"INSERT INTO password_reset_tokens(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '30 minutes')",[token_hash,user_id]); if has(saved) { pg_liberer(unwrap_or(saved,ptr_null())) }
             let smtp_id = unwrap_or(env("NOLCORE_RESET_SMTP_ID"),unwrap_or(env("NOLCORE_VERIFICATION_SMTP_ID"),""))
-            if smtp_id != "" {
+            if mail_api_disponible() {
+                let from = unwrap_or(env("NOLCORE_RESET_FROM"),unwrap_or(env("NOLCORE_VERIFICATION_FROM"),"no-reply@noliae.com"))
+                let url = unwrap_or(env("NOLCORE_RESET_URL"),unwrap_or(env("NOLCORE_PUBLIC_URL"),"http://localhost:8080") + "/reset") + "?token=" + unwrap_or(raw_token,"")
+                let _sent = mail_api_envoyer(from, unwrap_or(email,""), "Réinitialisez votre mot de passe", "Utilisez ce lien valable 30 minutes : " + url)
+            } else if smtp_id != "" {
                 let profile = pg_requete_params(db_conn,"SELECT host,port,username,secret_env FROM smtp_profiles WHERE id=$1 AND enabled=true",[smtp_id])
                 if has(profile) and pg_lignes(unwrap_or(profile,ptr_null())) == 1 {
                     let p = unwrap_or(profile,ptr_null()); let host=unwrap_or(pg_valeur(p,0,0),""); let port=unwrap_or(parse_int(unwrap_or(pg_valeur(p,0,1),"465")),465); let username=unwrap_or(pg_valeur(p,0,2),""); let password=unwrap_or(env(unwrap_or(pg_valeur(p,0,3),"")),"")

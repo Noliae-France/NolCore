@@ -1,6 +1,24 @@
 import "../nolc/lib/crypto.nol"
 import "../nolc/lib/tls.nol"
 
+// Envoi via l'API Mail HTTPS (Bearer token), chemin utilisé quand le SMTP
+// sortant est bloqué par l'hébergeur (OVH bloque tout SMTP direct depuis ce
+// VPS) : POST JSON {to,from,subject,text} avec Authorization: Bearer <token>.
+// Configuré via NOLCORE_MAIL_API_URL / NOLCORE_MAIL_API_TOKEN.
+fn mail_api_disponible() -> Bool {
+    return unwrap_or(env("NOLCORE_MAIL_API_URL"), "") != "" and unwrap_or(env("NOLCORE_MAIL_API_TOKEN"), "") != ""
+}
+fn mail_api_envoyer(expediteur: Text, destinataire: Text, sujet: Text, corps: Text) -> Bool {
+    let url = unwrap_or(env("NOLCORE_MAIL_API_URL"), "")
+    let token = unwrap_or(env("NOLCORE_MAIL_API_TOKEN"), "")
+    if url == "" or token == "" { return false }
+    let body = "{\"to\":" + json_texte(destinataire) + ",\"from\":" + json_texte(expediteur) + ",\"subject\":" + json_texte(sujet) + ",\"text\":" + json_texte(corps) + "}"
+    let rep = http_post_token(url, "application/json", body, token)
+    if not has(rep) { return false }
+    let statut = unwrap_or(rep, ReponseHttp { statut: 0, entetes: "", corps: "" }).statut
+    return statut >= 200 and statut < 300
+}
+
 fn smtp_ok(reponse: Text) -> Bool {
     if len(reponse) < 3 { return false }
     let code = parse_int(sub(reponse,0,3))
