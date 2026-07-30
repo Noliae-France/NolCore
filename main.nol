@@ -5,6 +5,7 @@ import "../nolc/lib/sodium.nol"
 import "../nolc/lib/temps.nol"
 import "../nolc/lib/http_client.nol"
 import "smtp.nol"
+import "auth.nol"
 
 fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
 
@@ -284,7 +285,7 @@ fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
     if not has(email) or not has(mot) { return erreur_json(422, "Unprocessable Content", "email et password sont obligatoires.", req) }
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
-    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,email,display_name,password_hash,role,email_verified FROM users WHERE email=$1", [unwrap_or(email, "")])
+    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,email,display_name,password_hash,role,email_verified,totp_secret,totp_enabled FROM users WHERE email=$1", [unwrap_or(email, "")])
     if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Identifiants invalides.", req) }
     let sortie = unwrap_or(res, ptr_null())
     if pg_lignes(sortie) != 1 { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Identifiants invalides.", req) }
@@ -293,6 +294,14 @@ fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
     if not valide { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Identifiants invalides.", req) }
     let verifie = unwrap_or(pg_valeur(sortie,0,5),"false")
     if verifie != "true" and verifie != "t" { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(403,"Forbidden","Adresse e-mail non vérifiée.",req) }
+    // MFA : si le TOTP est activé, exiger un code valide (champ « otp »).
+    let totp_on = unwrap_or(pg_valeur(sortie, 0, 7), "false")
+    if totp_on == "true" or totp_on == "t" {
+        let otp = champ_entree(req, "otp")
+        let secret_totp = unwrap_or(pg_valeur(sortie, 0, 6), "")
+        if not has(otp) { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "MFA Required", "Code d'authentification à deux facteurs requis.", req) }
+        if not totp_verifie(secret_totp, unwrap_or(otp, ""), maintenant_epoch()) { pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(401, "Unauthorized", "Code MFA invalide.", req) }
+    }
     let id = unwrap_or(pg_valeur(sortie, 0, 0), "")
     let token = session_signe(unwrap_or(env("NOLIAE_SESSION_SECRET"), ""), id, 86400, maintenant_epoch())
     let cookie = cookie_session(unwrap_or(env("NOLIAE_SESSION_SECRET"), ""), unwrap_or(email,""), ip_requete(req))
@@ -301,7 +310,7 @@ fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
         let session_id = random_hex(16)
         if has(session_id) {
             let bearer_hash = hmac_sha256_hex(bytes_from_text(unwrap_or(env("NOLIAE_SESSION_SECRET"), "")), bytes_from_text(unwrap_or(token,"")))
-            let saved_session = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO user_sessions(session_id,token_hash,bearer_token_hash,user_id,email,ip,expires_at) VALUES($1,$2,$3,$4,$5,$6,now()+interval '24 hours')", [unwrap_or(session_id,""),cookie_hash,bearer_hash,id,unwrap_or(email,""),ip_requete(req)])
+            let saved_session = pg_requete_params(unwrap_or(conn,ptr_null()), "INSERT INTO user_sessions(session_id,token_hash,bearer_token_hash,user_id,email,ip,user_agent,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()+interval '24 hours')", [unwrap_or(session_id,""),cookie_hash,bearer_hash,id,unwrap_or(email,""),ip_requete(req),unwrap_or(requete_entete(req,"User-Agent"),"")])
             if has(saved_session) { pg_liberer(unwrap_or(saved_session,ptr_null())) }
         }
     }
@@ -399,12 +408,12 @@ fn api_user_sessions(req: Requete, _params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
     if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
     let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
-    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT session_id,ip,issued_at,expires_at FROM user_sessions WHERE user_id=$1 AND revoked=false AND expires_at>now() ORDER BY issued_at DESC LIMIT 100", [unwrap_or(id,"")])
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT session_id,ip,issued_at,expires_at,user_agent FROM user_sessions WHERE user_id=$1 AND revoked=false AND expires_at>now() ORDER BY issued_at DESC LIMIT 100", [unwrap_or(id,"")])
     if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Lecture des sessions impossible.",req) }
     let rows = unwrap_or(res,ptr_null()); var items = "["; var i = 0
     while i < pg_lignes(rows) {
         if i > 0 { items += "," }
-        items += "{\"id\":" + json_texte(unwrap_or(pg_valeur(rows,i,0),"")) + ",\"ip\":" + json_texte(unwrap_or(pg_valeur(rows,i,1),"")) + ",\"issued_at\":" + json_texte(unwrap_or(pg_valeur(rows,i,2),"")) + ",\"expires_at\":" + json_texte(unwrap_or(pg_valeur(rows,i,3),"")) + "}"
+        items += "{\"id\":" + json_texte(unwrap_or(pg_valeur(rows,i,0),"")) + ",\"ip\":" + json_texte(unwrap_or(pg_valeur(rows,i,1),"")) + ",\"issued_at\":" + json_texte(unwrap_or(pg_valeur(rows,i,2),"")) + ",\"expires_at\":" + json_texte(unwrap_or(pg_valeur(rows,i,3),"")) + ",\"user_agent\":" + json_texte(unwrap_or(pg_valeur(rows,i,4),"")) + "}"
         i = i + 1
     }
     pg_liberer(rows); pg_fermer(unwrap_or(conn,ptr_null()))
@@ -432,6 +441,101 @@ fn api_user_sessions_revoke_all(req: Requete, _params: Map<Text>) -> WebResultat
     if has(changed) { pg_liberer(unwrap_or(changed,ptr_null())) }
     pg_fermer(unwrap_or(conn,ptr_null()))
     return WebResultat.WebOk(reponse_json("{\"revoked\":true}"))
+}
+
+// ---------- MFA (TOTP) ----------
+
+fn api_totp_setup(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let secret = totp_secret_nouveau()
+    if secret == "" { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Génération du secret impossible.",req) }
+    let em = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE users SET totp_secret=$1, totp_enabled=false WHERE id=$2 RETURNING email", [secret, unwrap_or(id,"")])
+    var email = "utilisateur"
+    if has(em) { let r = unwrap_or(em,ptr_null()); if pg_lignes(r) == 1 { email = unwrap_or(pg_valeur(r,0,0),"utilisateur") } pg_liberer(r) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    let uri = otpauth_uri(email, secret, unwrap_or(env("NOLCORE_MFA_ISSUER"),"NolCore"))
+    return WebResultat.WebOk(reponse_json("{\"secret\":" + json_texte(secret) + ",\"otpauth\":" + json_texte(uri) + "}"))
+}
+
+fn api_totp_enable(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let otp = champ_entree(req, "otp")
+    if not has(otp) { return erreur_json(422,"Unprocessable Content","Code obligatoire.",req) }
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT totp_secret FROM users WHERE id=$1", [unwrap_or(id,"")])
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Lecture impossible.",req) }
+    let r = unwrap_or(res,ptr_null()); let secret = unwrap_or(pg_valeur(r,0,0),""); pg_liberer(r)
+    if secret == "" or not totp_verifie(secret, unwrap_or(otp,""), maintenant_epoch()) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(401,"Unauthorized","Code invalide.",req) }
+    let up = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE users SET totp_enabled=true WHERE id=$1", [unwrap_or(id,"")])
+    if has(up) { pg_liberer(unwrap_or(up,ptr_null())) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"totp_enabled\":true}"))
+}
+
+fn api_totp_disable(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let otp = champ_entree(req, "otp")
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT totp_secret FROM users WHERE id=$1", [unwrap_or(id,"")])
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Lecture impossible.",req) }
+    let r = unwrap_or(res,ptr_null()); let secret = unwrap_or(pg_valeur(r,0,0),""); pg_liberer(r)
+    if not has(otp) or not totp_verifie(secret, unwrap_or(otp,""), maintenant_epoch()) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(401,"Unauthorized","Code invalide.",req) }
+    let up = pg_requete_params(unwrap_or(conn,ptr_null()), "UPDATE users SET totp_enabled=false, totp_secret='' WHERE id=$1", [unwrap_or(id,"")])
+    if has(up) { pg_liberer(unwrap_or(up,ptr_null())) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"totp_enabled\":false}"))
+}
+
+// ---------- RGPD : export et suppression ----------
+
+fn export_json_val(conn: Ptr<PgConn>, sql: Text, id: Text, defaut: Text) -> Text {
+    let res = pg_requete_params(conn, sql, [id])
+    if not has(res) { return defaut }
+    let r = unwrap_or(res, ptr_null())
+    var v = defaut
+    if pg_lignes(r) == 1 { v = unwrap_or(pg_valeur(r, 0, 0), defaut) }
+    pg_liberer(r)
+    if v == "" { return defaut }
+    return v
+}
+
+fn api_account_export(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let c = unwrap_or(conn, ptr_null())
+    let cid = unwrap_or(id, "")
+    let prof = export_json_val(c, "SELECT to_jsonb(u)-'password_hash'-'totp_secret' FROM users u WHERE id=$1", cid, "null")
+    let conv = export_json_val(c, "SELECT coalesce(jsonb_agg(x),'[]') FROM conversations x WHERE user_id=$1", cid, "[]")
+    let msgs = export_json_val(c, "SELECT coalesce(jsonb_agg(m),'[]') FROM messages m JOIN conversations x ON x.id=m.conversation_id WHERE x.user_id=$1", cid, "[]")
+    let docs = export_json_val(c, "SELECT coalesce(jsonb_agg(to_jsonb(d)-'search_vector'),'[]') FROM documents d WHERE owner_id=$1", cid, "[]")
+    let usage = export_json_val(c, "SELECT coalesce(jsonb_agg(a),'[]') FROM ai_usage a WHERE user_id=$1", cid, "[]")
+    let sess = export_json_val(c, "SELECT coalesce(jsonb_agg(jsonb_build_object('ip',ip,'user_agent',user_agent,'issued_at',issued_at,'expires_at',expires_at,'revoked',revoked)),'[]') FROM user_sessions WHERE user_id=$1", cid, "[]")
+    pg_fermer(c)
+    let corps = "{\"profil\":" + prof + ",\"conversations\":" + conv + ",\"messages\":" + msgs + ",\"documents\":" + docs + ",\"usage_ia\":" + usage + ",\"sessions\":" + sess + "}"
+    var rep = reponse_json(corps)
+    rep = reponse_avec_entete(rep, "Content-Disposition", "attachment; filename=\"export-nolcore.json\"")
+    return WebResultat.WebOk(rep)
+}
+
+fn api_account_delete(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    let mot = champ_entree(req, "password")
+    if not has(mot) { return erreur_json(422,"Unprocessable Content","Mot de passe requis pour confirmer.",req) }
+    let conn = db(); if not has(conn) { return erreur_json(503,"Service Unavailable","Base PostgreSQL indisponible.",req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT password_hash FROM users WHERE id=$1", [unwrap_or(id,"")])
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Lecture impossible.",req) }
+    let r = unwrap_or(res,ptr_null()); let hash = unwrap_or(pg_valeur(r,0,0),""); pg_liberer(r)
+    if not mot_de_passe_verifie(hash, bytes_from_text(unwrap_or(mot,""))) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(401,"Unauthorized","Mot de passe invalide.",req) }
+    let del = pg_requete_params(unwrap_or(conn,ptr_null()), "DELETE FROM users WHERE id=$1", [unwrap_or(id,"")])
+    if has(del) { pg_liberer(unwrap_or(del,ptr_null())) }
+    pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json("{\"deleted\":true}"))
 }
 
 fn api_document(req: Requete, _params: Map<Text>) -> WebResultat {
@@ -813,6 +917,11 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "GET", "/v1/user/verify", api_verify_email)
     route_type(methodes, patrons, handlers, "GET", "/v1/user/me", api_me)
     route_type(methodes, patrons, handlers, "GET", "/v1/user/me/sessions", api_user_sessions)
+    route_type(methodes, patrons, handlers, "POST", "/v1/auth/totp/setup", api_totp_setup)
+    route_type(methodes, patrons, handlers, "POST", "/v1/auth/totp/enable", api_totp_enable)
+    route_type(methodes, patrons, handlers, "POST", "/v1/auth/totp/disable", api_totp_disable)
+    route_type(methodes, patrons, handlers, "GET", "/v1/account/export", api_account_export)
+    route_type(methodes, patrons, handlers, "POST", "/v1/account/delete", api_account_delete)
     route_type(methodes, patrons, handlers, "DELETE", "/v1/user/me/sessions/:session_id", api_user_session_revoke)
     route_type(methodes, patrons, handlers, "POST", "/v1/user/me/sessions/revoke-all", api_user_sessions_revoke_all)
     route_type(methodes, patrons, handlers, "POST", "/v1/user/resetpassword", api_user_reset)

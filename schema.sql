@@ -35,3 +35,6 @@ ALTER TABLE instance_branding ADD COLUMN IF NOT EXISTS account_url TEXT NOT NULL
 ALTER TABLE instance_branding ADD COLUMN IF NOT EXISTS api_url TEXT NOT NULL DEFAULT '';
 INSERT INTO instance_branding(id,name) VALUES (true,'NolCore') ON CONFLICT (id) DO NOTHING;
 INSERT INTO permissions(code,description) VALUES ('users.read','Lire les utilisateurs'),('users.manage','Gérer les utilisateurs'),('admin.read','Accéder à l’administration'),('documents.write','Créer des documents'),('ai.use','Utiliser l’interface IA') ON CONFLICT DO NOTHING;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS user_agent TEXT NOT NULL DEFAULT '';
