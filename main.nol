@@ -979,7 +979,12 @@ fn api_search_text(req: Requete, params: Map<Text>) -> WebResultat {
     let q = parametre(params, "keyword")
     if q == "" { return erreur_json(422,"Unprocessable Content","keyword obligatoire.",req) }
     var copie = req
-    copie.query = "q=" + q
+    var qs = "q=" + q
+    let page = requete_query(req, "page")
+    if has(page) { qs = qs + "&page=" + unwrap_or(page, "") }
+    let limit = requete_query(req, "limit")
+    if has(limit) { qs = qs + "&limit=" + unwrap_or(limit, "") }
+    copie.query = qs
     return api_search(copie, params)
 }
 
