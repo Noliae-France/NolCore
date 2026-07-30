@@ -78,6 +78,14 @@ curl http://localhost:8080/api/dependencies
 Les fichiers `.nhtml` de `examples/mvc` sont uniquement des exemples MVC : ils
 ne sont pas compilés ni servis par le core.
 
+## Frontends et domaines
+
+Les frontends publics sont des dépôts NHTML/Nolc séparés : Search, IA, Login,
+Register et Account. Ils récupèrent les destinations inter-applications depuis
+le hostname actif : `search.beta.noliae.com` renvoie par exemple vers
+`account.beta.noliae.com`, jamais vers un chemin local inventé. Les liens de
+marque et le nom affiché peuvent aussi être fournis par `GET /v1/branding`.
+
 ## Configuration
 
 | Variable | Usage |
