@@ -312,6 +312,12 @@ fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
     let email = champ_entree(req, "email")
     let mot = champ_entree(req, "password")
     if not has(email) or not has(mot) { return erreur_json(422, "Unprocessable Content", "email et password sont obligatoires.", req) }
+    // Anti brute-force : clé sur l'e-mail tenté (le WAF ne transmet PAS
+    // l'IP client, donc une clé par IP serait inefficace ici — voir aussi
+    // redis_rate_ok). Fail-open si Redis est indisponible (la robustesse du
+    // hash + la 2FA restent la vraie défense) ; sinon 10 tentatives / 5 min.
+    let rl_login = redis_rate_ok("login:" + lower(trim(unwrap_or(email, ""))), 10, 300)
+    if has(rl_login) and not unwrap_or(rl_login, true) { return erreur_json(429, "Too Many Requests", "Trop de tentatives de connexion, réessayez dans quelques minutes.", req) }
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
     let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,email,display_name,password_hash,role,email_verified,totp_secret,totp_enabled FROM users WHERE email=$1", [unwrap_or(email, "")])
