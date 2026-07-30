@@ -14,6 +14,8 @@ services:
       NOLIAE_PORT: 8080
       NOLIAE_SESSION_SECRET: ${NOLIAE_SESSION_SECRET:-dev-secret-change-me-please-32chars}
       NOLCORE_DATABASE_URL: postgres://nolcore:nolcore_dev_only@postgres:5432/nolcore
+      NOLCORE_REDIS_HOST: redis
+      NOLCORE_REDIS_PORT: "6379"
       NOLCORE_CRAWLER_URL: http://crawler:8091
       NOLCORE_IA_URL: http://ia:8092
       NOLCORE_CLAUDE_URL: ${NOLCORE_CLAUDE_URL:-}
@@ -30,8 +32,14 @@ services:
     ports: ["8080:8080"]
     depends_on:
       postgres: {condition: service_healthy}
+      redis: {condition: service_started}
       crawler: {condition: service_started}
       ia: {condition: service_started}
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    expose: ["6379"]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 10}
   crawler:
     image: ghcr.io/noliae-france/nolcore-crawler:main
     expose: ["8091"]
