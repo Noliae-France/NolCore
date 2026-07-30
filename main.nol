@@ -232,6 +232,21 @@ fn api_verify_email(req: Requete, _params: Map<Text>) -> WebResultat {
     if has(res) { pg_liberer(unwrap_or(res,ptr_null())) }; pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(400,"Bad Request","Token invalide ou expiré.",req)
 }
 
+// Extrait le texte réel de la réponse d'un fournisseur IA depuis l'enveloppe
+// renvoyée par NolCore-IA ({"provider":..,"result":"<JSON brut échappé>",...}).
+// Sans cette extraction, on renverrait/stockerait l'enveloppe JSON brute au
+// lieu du texte lisible attendu par l'utilisateur.
+fn ia_reponse_texte(enveloppe: Text, provider: Text) -> Text {
+    let raw = unwrap_or(json_texte_champ(enveloppe, "result"), enveloppe)
+    if provider == "claude" {
+        return unwrap_or(json_chemin_texte(raw, "content.0.text"), raw)
+    }
+    if provider == "gemini" {
+        return unwrap_or(json_chemin_texte(raw, "candidates.0.content.parts.0.text"), raw)
+    }
+    // chatgpt / openai / mistral (et fournisseurs compatibles Chat Completions)
+    return unwrap_or(json_chemin_texte(raw, "choices.0.message.content"), raw)
+}
 fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
     let id = utilisateur(req, secret)
@@ -269,12 +284,16 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     let body = "{\"provider\":" + json_texte(fournisseur) + ",\"model\":" + json_texte(modele) + ",\"text\":" + json_texte(unwrap_or(message,"") + contexte) + "}"
     let ia = http_post(service_url + "/v1/ia", "application/json", body)
     if not has(ia) or unwrap_or(ia,ReponseHttp { statut:0, entetes:"", corps:"" }).statut >= 300 { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(502,"Bad Gateway","Service IA indisponible.",req) }
-    let answer = unwrap_or(ia,ReponseHttp { statut:0, entetes:"", corps:"" }).corps
+    let enveloppe = unwrap_or(ia,ReponseHttp { statut:0, entetes:"", corps:"" }).corps
+    // « enveloppe » est {"provider":..,"result":"<JSON brut du fournisseur, échappé>",...} :
+    // il faut décoder "result" PUIS en extraire le texte réel de la réponse
+    // (jamais renvoyer/stocker l'enveloppe brute telle quelle).
+    let answer = ia_reponse_texte(enveloppe, fournisseur)
     let saved_answer = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO messages(conversation_id,role,content) VALUES($1,'assistant',$2)", [conv_id, answer])
     if has(saved_answer) { pg_liberer(unwrap_or(saved_answer,ptr_null())) }
-    let input_tokens = unwrap_or(json_chemin_int(answer,"input_tokens"),0)
-    let output_tokens = unwrap_or(json_chemin_int(answer,"output_tokens"),0)
-    let estimated_cost = unwrap_or(json_chemin_int(answer,"estimated_cost_micros"),0)
+    let input_tokens = unwrap_or(json_chemin_int(enveloppe,"input_tokens"),0)
+    let output_tokens = unwrap_or(json_chemin_int(enveloppe,"output_tokens"),0)
+    let estimated_cost = unwrap_or(json_chemin_int(enveloppe,"estimated_cost_micros"),0)
     let cost = pg_requete_params(unwrap_or(conn,ptr_null()),"INSERT INTO ai_usage(user_id,conversation_id,provider,model,input_chars,output_chars,estimated_cost_micros) VALUES($1,$2,$3,$4,$5,$6,$7)",[unwrap_or(id,""),conv_id,fournisseur,modele,text(input_tokens),text(output_tokens),text(estimated_cost)])
     if has(cost) { pg_liberer(unwrap_or(cost,ptr_null())) }
     pg_fermer(unwrap_or(conn, ptr_null()))
@@ -943,14 +962,41 @@ fn api_search_image(req: Requete, params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json(unwrap_or(json_chemin(unwrap_or(images,ReponseHttp {statut:0,entetes:"",corps:"{}"}).corps,"results"),"[]")))
 }
 
+// Fournisseur/modèle par défaut pour la « Réponse IA » de la recherche :
+// premier fournisseur configuré (même priorité et mêmes modèles que
+// api_ia_modeles), pour ne jamais envoyer un identifiant de modèle inventé.
+fn search_ia_provider() -> Text {
+    if unwrap_or(env("NOLCORE_CHATGPT_TOKEN"),"") != "" { return "chatgpt" }
+    if unwrap_or(env("NOLCORE_CLAUDE_TOKEN"),"") != "" { return "claude" }
+    if unwrap_or(env("NOLCORE_MISTRAL_TOKEN"),"") != "" { return "mistral" }
+    if unwrap_or(env("NOLCORE_GEMINI_TOKEN"),"") != "" { return "gemini" }
+    return unwrap_or(env("NOLCORE_DEFAULT_PROVIDER"),"chatgpt")
+}
+fn search_ia_modele(provider: Text) -> Text {
+    if provider == "chatgpt" { return "gpt-4o-mini" }
+    if provider == "claude" { return "claude-3-5-sonnet-latest" }
+    if provider == "mistral" { return "mistral-small-latest" }
+    if provider == "gemini" { return "gemini-1.5-flash" }
+    return unwrap_or(env("NOLCORE_DEFAULT_MODEL"),"gpt-4o-mini")
+}
+// Recherche « Réponse IA » : le front attend un TABLEAU de résultats
+// (title/description/source, comme les autres modes de recherche), pas
+// l'enveloppe brute du service IA. On extrait le texte réel de la réponse
+// (voir ia_reponse_texte) avant de la renvoyer.
 fn api_search_ia(req: Requete, params: Map<Text>) -> WebResultat {
+    if not has(utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
     let keyword = parametre(params, "keyword")
     if keyword == "" { return erreur_json(422,"Unprocessable Content","keyword obligatoire.",req) }
-    var p: Map<Text> = map_new()
-    map_set(p, "nameid", "mistral")
-    map_set(p, "modelia", "search")
-    map_set(p, "text", keyword)
-    return api_ia_modele(req, p)
+    let service_url = unwrap_or(env("NOLCORE_IA_URL"), "")
+    if service_url == "" { return erreur_json(503,"Service Unavailable","Service IA non configuré.",req) }
+    let provider = search_ia_provider()
+    let modele = search_ia_modele(provider)
+    let body = "{\"provider\":" + json_texte(provider) + ",\"model\":" + json_texte(modele) + ",\"text\":" + json_texte(keyword) + "}"
+    let service = http_post(service_url + "/v1/ia", "application/json", body)
+    if not has(service) or unwrap_or(service, ReponseHttp { statut:0, entetes:"", corps:"" }).statut >= 300 { return erreur_json(502,"Bad Gateway","Service IA indisponible.",req) }
+    let enveloppe = unwrap_or(service, ReponseHttp { statut:0, entetes:"", corps:"" }).corps
+    let texte = ia_reponse_texte(enveloppe, provider)
+    return WebResultat.WebOk(reponse_json("[{\"title\":\"Réponse IA\",\"description\":" + json_texte(texte) + ",\"source\":\"ia\"}]"))
 }
 
 fn api_crawler_visite(req: Requete, params: Map<Text>) -> WebResultat {
