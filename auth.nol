@@ -1,0 +1,137 @@
+// MFA TOTP (RFC 6238) pour NolCore : base32 (RFC 4648) + HMAC-SHA1 + code à
+// 6 chiffres. Copyright Bastien LANGUEDOC.
+//
+// La crypto de base (sha1, random_bytes) vient de crypto.nol ; on ajoute ici
+// ce qui manque pour le TOTP : le base32 (encodage des secrets) et HMAC-SHA1.
+
+import "../nolc/lib/crypto.nol"
+
+fn b32_alphabet() -> Text { return "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" }
+
+// Encode des octets en base32 sans padding.
+fn base32_encode(b: Bytes) -> Text {
+    let alpha = b32_alphabet()
+    var out = ""
+    var buffer = 0
+    var bits = 0
+    var i = 0
+    while i < len(b) {
+        buffer = bit_or(bit_shl(buffer, 8), bytes_get(b, i))
+        bits = bits + 8
+        while bits >= 5 {
+            bits = bits - 5
+            out = out + char_at(alpha, bit_and(bit_shr(buffer, bits), 31))
+        }
+        buffer = bit_and(buffer, bit_shl(1, bits) - 1)
+        i = i + 1
+    }
+    if bits > 0 {
+        out = out + char_at(alpha, bit_and(bit_shl(buffer, 5 - bits), 31))
+    }
+    return out
+}
+
+// Valeur d'un caractère base32 (A-Z=0..25, 2-7=26..31), ou -1.
+fn base32_valeur(c: Text) -> Int {
+    let p = find(b32_alphabet(), upper(c))
+    if has(p) { return unwrap_or(p, -1) }
+    return -1
+}
+
+// Décode une chaîne base32 (tolère espaces et « = »).
+fn base32_decode(t: Text) -> Option<Bytes> {
+    var out = bytes_new()
+    var buffer = 0
+    var bits = 0
+    var i = 0
+    while i < len(t) {
+        let c = char_at(t, i)
+        i = i + 1
+        if c != "=" and c != " " {
+            let v = base32_valeur(c)
+            if v < 0 { return none }
+            buffer = bit_or(bit_shl(buffer, 5), v)
+            bits = bits + 5
+            if bits >= 8 {
+                bits = bits - 8
+                bytes_push(out, bit_and(bit_shr(buffer, bits), 255))
+                buffer = bit_and(buffer, bit_shl(1, bits) - 1)
+            }
+        }
+    }
+    return some(out)
+}
+
+// HMAC-SHA1 (RFC 2104), bloc de 64 octets.
+fn hmac_sha1(cle: Bytes, message: Bytes) -> Bytes {
+    let bloc_taille = 64
+    var cle_norm = bytes_new()
+    if len(cle) > bloc_taille { bytes_append(cle_norm, sha1(cle)) } else { bytes_append(cle_norm, cle) }
+    while len(cle_norm) < bloc_taille { bytes_push(cle_norm, 0) }
+    var ipad = bytes_new()
+    var opad = bytes_new()
+    var i = 0
+    while i < bloc_taille {
+        let o = bytes_get(cle_norm, i)
+        bytes_push(ipad, bit_xor(o, 54))
+        bytes_push(opad, bit_xor(o, 92))
+        i = i + 1
+    }
+    var interne = bytes_new()
+    bytes_append(interne, ipad)
+    bytes_append(interne, message)
+    let h = sha1(interne)
+    var externe = bytes_new()
+    bytes_append(externe, opad)
+    bytes_append(externe, h)
+    return sha1(externe)
+}
+
+// Code TOTP pour un instant donné (epoch en secondes, pas de 30 s, 6 chiffres).
+fn totp_code(secret_b32: Text, epoch: Int, pas: Int, digits: Int) -> Text {
+    let osec = base32_decode(secret_b32)
+    if not has(osec) { return "" }
+    let secret = unwrap_or(osec, bytes_new())
+    let compteur = epoch / pas
+    // Compteur sur 8 octets big-endian.
+    var petits: List<Int> = []
+    var c = compteur
+    var k = 0
+    while k < 8 { push(petits, bit_and(c, 255)); c = c / 256; k = k + 1 }
+    var msg = bytes_new()
+    var j = 7
+    while j >= 0 { bytes_push(msg, get(petits, j)); j = j - 1 }
+    let hs = hmac_sha1(secret, msg)
+    let offset = bit_and(bytes_get(hs, 19), 15)
+    let bin = bit_or(bit_or(bit_or(bit_shl(bit_and(bytes_get(hs, offset), 127), 24), bit_shl(bytes_get(hs, offset + 1), 16)), bit_shl(bytes_get(hs, offset + 2), 8)), bytes_get(hs, offset + 3))
+    var modulo = 1
+    var d = 0
+    while d < digits { modulo = modulo * 10; d = d + 1 }
+    var s = text(bin % modulo)
+    while len(s) < digits { s = "0" + s }
+    return s
+}
+
+// Vérifie un code TOTP avec tolérance d'une fenêtre avant/après (dérive d'horloge).
+fn totp_verifie(secret_b32: Text, code: Text, epoch: Int) -> Bool {
+    if len(code) < 6 or secret_b32 == "" { return false }
+    let pas = 30
+    var w = 0 - 1
+    while w <= 1 {
+        if totp_code(secret_b32, epoch + w * pas, pas, 6) == code { return true }
+        w = w + 1
+    }
+    return false
+}
+
+// Nouveau secret aléatoire (160 bits) encodé base32, prêt pour un authenticator.
+fn totp_secret_nouveau() -> Text {
+    let ob = random_bytes(20)
+    if not has(ob) { return "" }
+    return base32_encode(unwrap_or(ob, bytes_new()))
+}
+
+// URI otpauth:// pour le QR code d'un authenticator.
+fn otpauth_uri(compte: Text, secret_b32: Text, emetteur: Text) -> Text {
+    return "otpauth://totp/" + emetteur + ":" + compte + "?secret=" + secret_b32 + "&issuer=" + emetteur + "&algorithm=SHA1&digits=6&period=30"
+}

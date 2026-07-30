@@ -1,0 +1,171 @@
+// WebAuthn (passkeys) pour NolCore : base64url, décodeur CBOR minimal,
+// extraction de la clé publique COSE depuis authenticatorData, et vérification
+// de signature. Copyright Bastien LANGUEDOC.
+//
+// Sécurité : on n'accepte QUE les clés dont on sait vérifier la signature.
+// EdDSA (Ed25519, alg -8) est vérifié via libsodium (sign_verifie). ES256
+// (P-256, alg -7) n'est pas encore supporté (nécessite un binding OpenSSL EC)
+// et est refusé à l'enregistrement pour ne jamais stocker une credential
+// invérifiable.
+
+import "../nolc/lib/crypto.nol"
+import "../nolc/lib/sodium.nol"
+
+// ---------- base64url ----------
+
+fn base64url_decode(t: Text) -> Option<Bytes> {
+    var s = replace(replace(t, "-", "+"), "_", "/")
+    while len(s) % 4 != 0 { s = s + "=" }
+    return base64_decode(s)
+}
+
+fn base64url_encode(b: Bytes) -> Text {
+    var s = replace(replace(base64_encode(b), "+", "-"), "/", "_")
+    // retire le padding « = »
+    var out = ""
+    var i = 0
+    while i < len(s) {
+        let c = char_at(s, i)
+        if c != "=" { out = out + c }
+        i = i + 1
+    }
+    return out
+}
+
+// ---------- CBOR minimal ----------
+
+// En-tête CBOR : type majeur (octet>>5), argument, et offset après l'en-tête.
+record CborTete {
+    major: Int,
+    arg: Int,
+    apres: Int
+}
+
+fn cbor_tete(b: Bytes, off: Int) -> CborTete {
+    let init = bytes_get(b, off)
+    let major = bit_shr(init, 5)
+    let info = bit_and(init, 31)
+    if info < 24 { return CborTete { major: major, arg: info, apres: off + 1 } }
+    if info == 24 { return CborTete { major: major, arg: bytes_get(b, off + 1), apres: off + 2 } }
+    if info == 25 { return CborTete { major: major, arg: bit_or(bit_shl(bytes_get(b, off + 1), 8), bytes_get(b, off + 2)), apres: off + 3 } }
+    if info == 26 { return CborTete { major: major, arg: bit_or(bit_or(bit_or(bit_shl(bytes_get(b, off + 1), 24), bit_shl(bytes_get(b, off + 2), 16)), bit_shl(bytes_get(b, off + 3), 8)), bytes_get(b, off + 4)), apres: off + 5 } }
+    return CborTete { major: major, arg: 0, apres: off + 9 }
+}
+
+// Saute une valeur CBOR complète, renvoie l'offset juste après.
+fn cbor_skip(b: Bytes, off: Int) -> Int {
+    let t = cbor_tete(b, off)
+    if t.major == 2 or t.major == 3 { return t.apres + t.arg }
+    if t.major == 4 {
+        var o = t.apres
+        var i = 0
+        while i < t.arg { o = cbor_skip(b, o); i = i + 1 }
+        return o
+    }
+    if t.major == 5 {
+        var o = t.apres
+        var i = 0
+        while i < t.arg { o = cbor_skip(b, o); o = cbor_skip(b, o); i = i + 1 }
+        return o
+    }
+    if t.major == 6 { return cbor_skip(b, t.apres) }
+    return t.apres
+}
+
+fn cbor_texte_egal(b: Bytes, start: Int, longueur: Int, s: Text) -> Bool {
+    return unwrap_or(bytes_to_text(bytes_slice(b, start, longueur)), "") == s
+}
+
+// Récupère la valeur (bstr) associée à une clé texte dans une map CBOR racine.
+fn cbor_map_bstr(b: Bytes, cle: Text) -> Option<Bytes> {
+    let m = cbor_tete(b, 0)
+    if m.major != 5 { return none }
+    var o = m.apres
+    var i = 0
+    while i < m.arg {
+        let kt = cbor_tete(b, o)
+        let voff = cbor_skip(b, o)
+        var kmatch = false
+        if kt.major == 3 { kmatch = cbor_texte_egal(b, kt.apres, kt.arg, cle) }
+        let vt = cbor_tete(b, voff)
+        if kmatch and vt.major == 2 { return some(bytes_slice(b, vt.apres, vt.arg)) }
+        o = cbor_skip(b, voff)
+        i = i + 1
+    }
+    return none
+}
+
+// ---------- authenticatorData ----------
+
+fn ad_flags(ad: Bytes) -> Int { return bytes_get(ad, 32) }
+
+fn ad_sign_count(ad: Bytes) -> Int {
+    return bit_or(bit_or(bit_or(bit_shl(bytes_get(ad, 33), 24), bit_shl(bytes_get(ad, 34), 16)), bit_shl(bytes_get(ad, 35), 8)), bytes_get(ad, 36))
+}
+
+// Longueur du credentialId (présent si le drapeau AT = 0x40 est posé).
+fn ad_cred_id_len(ad: Bytes) -> Int {
+    return bit_or(bit_shl(bytes_get(ad, 53), 8), bytes_get(ad, 54))
+}
+
+fn ad_cred_id(ad: Bytes) -> Bytes {
+    let n = ad_cred_id_len(ad)
+    return bytes_slice(ad, 55, n)
+}
+
+// Offset du début de la clé COSE dans authData.
+fn ad_cose_offset(ad: Bytes) -> Int {
+    return 55 + ad_cred_id_len(ad)
+}
+
+// alg COSE (clé 3) depuis la map COSE à `off`. Négatif pour ES256/EdDSA.
+fn cose_alg(b: Bytes, off: Int) -> Int {
+    let m = cbor_tete(b, off)
+    if m.major != 5 { return 0 }
+    var o = m.apres
+    var i = 0
+    while i < m.arg {
+        let kt = cbor_tete(b, o)
+        let voff = cbor_skip(b, o)
+        // clé entière 3 (uint) => alg
+        if kt.major == 0 and kt.arg == 3 {
+            let vt = cbor_tete(b, voff)
+            if vt.major == 0 { return vt.arg }
+            if vt.major == 1 { return 0 - 1 - vt.arg }
+        }
+        o = cbor_skip(b, voff)
+        i = i + 1
+    }
+    return 0
+}
+
+// Coordonnée « x » (clé -2) d'une clé COSE OKP (Ed25519) : la clé publique.
+fn cose_x(b: Bytes, off: Int) -> Option<Bytes> {
+    let m = cbor_tete(b, off)
+    if m.major != 5 { return none }
+    var o = m.apres
+    var i = 0
+    while i < m.arg {
+        let kt = cbor_tete(b, o)
+        let voff = cbor_skip(b, o)
+        // clé -2 => major 1 (negint), arg 1
+        if kt.major == 1 and kt.arg == 1 {
+            let vt = cbor_tete(b, voff)
+            if vt.major == 2 { return some(bytes_slice(b, vt.apres, vt.arg)) }
+        }
+        o = cbor_skip(b, voff)
+        i = i + 1
+    }
+    return none
+}
+
+// ---------- Vérification d'assertion (login) ----------
+
+// Vérifie une signature WebAuthn EdDSA : la signature couvre
+// authenticatorData || SHA-256(clientDataJSON), signée par la clé Ed25519.
+fn webauthn_verifie_ed25519(cle_pub: Bytes, auth_data: Bytes, client_data: Bytes, signature: Bytes) -> Bool {
+    var message = bytes_new()
+    bytes_append(message, auth_data)
+    bytes_append(message, sha256(client_data))
+    return sign_verifie(signature, message, cle_pub)
+}
