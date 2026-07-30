@@ -907,6 +907,183 @@ fn application(req: Requete) -> WebResultat {
     return routeur_dispatch_type(methodes, patrons, handlers, req)
 }
 
+// Corps (JSON) d'une requête HTTP brute.
+fn ia_corps(raw: Text) -> Text {
+    let sep = find(raw, "\r\n\r\n")
+    if not has(sep) { return "" }
+    return sub(raw, unwrap_or(sep, 0) + 4, len(raw))
+}
+
+// Coût estimé en micro-euros à partir des tokens et des tarifs par fournisseur.
+fn ia_cout_core(provider: Text, entree: Int, sortie: Int) -> Int {
+    let prefix = "NOLCORE_" + upper(provider)
+    let in_rate = unwrap_or(parse_int(unwrap_or(env(prefix + "_INPUT_MICROS_PER_1K"), "0")), 0)
+    let out_rate = unwrap_or(parse_int(unwrap_or(env(prefix + "_OUTPUT_MICROS_PER_1K"), "0")), 0)
+    return (entree * in_rate) / 1000 + (sortie * out_rate) / 1000
+}
+
+// Lit l'entier qui suit `cle` dans `texte` (ex. cle = "\"in\":" -> 123).
+fn nombre_apres(texte: Text, cle: Text) -> Int {
+    let m = find(texte, cle)
+    if not has(m) { return 0 }
+    var i = unwrap_or(m, 0) + len(cle)
+    var n = ""
+    var stop = false
+    while i < len(texte) and not stop {
+        let c = char_at(texte, i)
+        if has(find("0123456789", c)) { n = n + c; i = i + 1 } else { stop = true }
+    }
+    return unwrap_or(parse_int(n), 0)
+}
+
+// Proxy SSE : authentifie, applique le quota horaire, puis RELAIE le flux
+// token-par-token du service NolCore-IA (/v1/ia/stream) vers le navigateur.
+// Écrit directement dans le socket `client` et le ferme. Fail-safe.
+fn core_ia_stream(client: Int, raw: Text) {
+    let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
+    var uid: Option<Text> = none
+    match http_analyser(raw, 65536, 1048576) {
+        Complet(rq) => { uid = utilisateur(rq, secret) }
+        Erreur(_c) => {}
+        Incomplet => {}
+    }
+    if not has(uid) {
+        let _e = tcp_write(client, "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Authentification requise\"}")
+        tcp_close(client); return
+    }
+    let body_in = ia_corps(raw)
+    let prov = unwrap_or(json_texte_champ(body_in, "provider"), "")
+    let modl = unwrap_or(json_texte_champ(body_in, "model"), "")
+    let texte = unwrap_or(json_texte_champ(body_in, "text"), "")
+    var texte_aug = texte
+    var usage_id = ""
+    // Contexte injecté dans le prompt : pièces jointes (éphémères, lues côté
+    // client et transmises dans la requête) puis documents (RAG, plus bas).
+    var contexte = ""
+    let pj = json_chemin(body_in, "attachments")
+    if has(pj) {
+        let arr = unwrap_or(pj, "[]")
+        var j = 0
+        while j < 3 {
+            let el = json_element_a(arr, j)
+            if not has(el) {
+                j = 3
+            } else {
+                let obj = unwrap_or(el, "")
+                let nom = unwrap_or(json_texte_champ(obj, "name"), "fichier")
+                var cont = unwrap_or(json_texte_champ(obj, "content"), "")
+                if len(cont) > 4000 { cont = sub(cont, 0, 4000) }
+                if cont != "" { contexte = contexte + "Pièce jointe « " + nom + " » :\n" + cont + "\n\n" }
+                j = j + 1
+            }
+        }
+    }
+    // Quota horaire + RAG (documents de l'utilisateur) + ligne ai_usage.
+    let conn = db()
+    if has(conn) {
+        let quota = unwrap_or(parse_int(unwrap_or(env("NOLCORE_AI_HOURLY_LIMIT"), "40")), 40)
+        let usage = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT count(*) FROM ai_usage WHERE user_id=$1 AND created_at > now()-interval '1 hour'", [unwrap_or(uid, "")])
+        if has(usage) {
+            let n = unwrap_or(parse_int(unwrap_or(pg_valeur(unwrap_or(usage, ptr_null()), 0, 0), "0")), 0)
+            pg_liberer(unwrap_or(usage, ptr_null()))
+            if n >= quota {
+                pg_fermer(unwrap_or(conn, ptr_null()))
+                let _q = tcp_write(client, "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Quota IA horaire atteint\"}")
+                tcp_close(client); return
+            }
+        }
+        // RAG : injecte le contenu des documents pertinents de l'utilisateur.
+        let rag = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT title,content FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank(search_vector,plainto_tsquery('french',$2)) DESC LIMIT 3", [unwrap_or(uid, ""), texte])
+        if has(rag) {
+            let rr = unwrap_or(rag, ptr_null())
+            if pg_lignes(rr) > 0 {
+                var ctx = ""
+                var k = 0
+                while k < pg_lignes(rr) {
+                    var contenu = unwrap_or(pg_valeur(rr, k, 1), "")
+                    if len(contenu) > 800 { contenu = sub(contenu, 0, 800) }
+                    ctx = ctx + "- " + unwrap_or(pg_valeur(rr, k, 0), "") + " : " + contenu + "\n"
+                    k = k + 1
+                }
+                contexte = contexte + "Documents de l'utilisateur (utilise-les s'ils sont pertinents) :\n" + ctx + "\n"
+            }
+            pg_liberer(rr)
+        }
+        let _rec = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO ai_usage(user_id,provider,model,input_chars,output_chars,estimated_cost_micros) VALUES($1,$2,$3,0,0,0) RETURNING id", [unwrap_or(uid, ""), prov, modl])
+        if has(_rec) { usage_id = unwrap_or(pg_valeur(unwrap_or(_rec, ptr_null()), 0, 0), ""); pg_liberer(unwrap_or(_rec, ptr_null())) }
+        pg_fermer(unwrap_or(conn, ptr_null()))
+    }
+    // Corps augmenté (pièces jointes + RAG) envoyé au service IA.
+    if contexte != "" { texte_aug = contexte + "\nQuestion : " + texte }
+    let body_out = "{\"provider\":" + json_texte(prov) + ",\"model\":" + json_texte(modl) + ",\"text\":" + json_texte(texte_aug) + "}"
+    // En-têtes SSE vers le navigateur.
+    let _h = tcp_write(client, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n")
+    let ourl = url_parse(unwrap_or(env("NOLCORE_IA_URL"), ""))
+    if not has(ourl) { let _e = tcp_write(client, "data: {\"error\":\"service IA non configuré\"}\n\ndata: [DONE]\n\n"); tcp_close(client); return }
+    let u = unwrap_or(ourl, UrlParties { schema: "", hote: "", port: 0, chemin: "" })
+    let co = tcp_connect(u.hote, u.port)
+    if not has(co) { let _e = tcp_write(client, "data: {\"error\":\"service IA injoignable\"}\n\ndata: [DONE]\n\n"); tcp_close(client); return }
+    let iafd = unwrap_or(co, -1)
+    tcp_set_timeout(iafd, 60000)
+    let reqia = "POST /v1/ia/stream HTTP/1.1\r\nHost: " + u.hote + "\r\nContent-Type: application/json\r\nContent-Length: " + text(len(body_out)) + "\r\nConnection: close\r\n\r\n" + body_out
+    let _s = tcp_write(iafd, reqia)
+    // Relais LIGNE-À-LIGNE : on transmet tout au navigateur, sauf la ligne
+    // interne « nolcore_usage » dont on extrait les tokens réels.
+    var buf = ""
+    var entetes_finies = false
+    var fini = false
+    var tours = 0
+    var usage_in = 0
+    var usage_out = 0
+    while not fini and tours < 200000 {
+        let m = tcp_read(iafd)
+        if not has(m) {
+            fini = true
+        } else {
+            let ch = unwrap_or(m, "")
+            if ch == "" {
+                fini = true
+            } else {
+                buf = buf + ch
+                if not entetes_finies {
+                    let sep = find(buf, "\r\n\r\n")
+                    if has(sep) { buf = sub(buf, unwrap_or(sep, 0) + 4, len(buf)); entetes_finies = true }
+                }
+                if entetes_finies {
+                    var nl = find(buf, "\n")
+                    while has(nl) {
+                        let i = unwrap_or(nl, 0)
+                        let ligne = sub(buf, 0, i + 1)
+                        buf = sub(buf, i + 1, len(buf))
+                        let lt = trim(ligne)
+                        if starts_with(lt, "data: {\"nolcore_usage\"") {
+                            usage_in = nombre_apres(lt, "\"in\":")
+                            usage_out = nombre_apres(lt, "\"out\":")
+                        } else {
+                            let _w = tcp_write(client, ligne)
+                        }
+                        nl = find(buf, "\n")
+                    }
+                }
+            }
+        }
+        tours = tours + 1
+    }
+    if entetes_finies and buf != "" { let _wr = tcp_write(client, buf) }
+    tcp_close(iafd)
+    tcp_close(client)
+    // Comptabilisation exacte : met à jour la ligne ai_usage insérée.
+    if usage_id != "" and (usage_in > 0 or usage_out > 0) {
+        let cout = ia_cout_core(prov, usage_in, usage_out)
+        let conn2 = db()
+        if has(conn2) {
+            let _upd = pg_requete_params(unwrap_or(conn2, ptr_null()), "UPDATE ai_usage SET input_chars=$1,output_chars=$2,estimated_cost_micros=$3 WHERE id=$4", [text(usage_in), text(usage_out), text(cout), usage_id])
+            if has(_upd) { pg_liberer(unwrap_or(_upd, ptr_null())) }
+            pg_fermer(unwrap_or(conn2, ptr_null()))
+        }
+    }
+}
+
 fn main() {
     let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
     if len(secret) < 32 { print("NOLIAE_SESSION_SECRET doit contenir au moins 32 caracteres"); return }
@@ -926,9 +1103,13 @@ fn main() {
         if has(venu) {
             let client = unwrap_or(venu, -1)
             let requete = lire_requete_http_complete(client, limites)
-            let reponse = web_repondre_resultat_pre(requete, limites, application, pre, post)
-            let _ecrit = tcp_write(client, reponse)
-            tcp_close(client)
+            if starts_with(requete, "POST /v1/ia/stream") {
+                core_ia_stream(client, requete)
+            } else {
+                let reponse = web_repondre_resultat_pre(requete, limites, application, pre, post)
+                let _ecrit = tcp_write(client, reponse)
+                tcp_close(client)
+            }
         }
     }
 }
