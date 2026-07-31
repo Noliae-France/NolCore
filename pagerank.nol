@@ -1,0 +1,55 @@
+// PageRank "maison" pour Noliae Search — même principe que l'algorithme
+// originel de Google (Brin & Page, 1998) : un lien entrant compte plus s'il
+// vient d'une page elle-même autoritaire, pas seulement en nombre brut de
+// liens. Contrairement à Google, tout est ouvert : ce fichier EST
+// l'algorithme de classement, lisible par n'importe qui (cf. demande de
+// l'utilisateur : "on sera open source au moins").
+//
+// Toute la boucle de puissance (power iteration) tourne en SQL pur — Postgres
+// gère les flottants nativement, Nolc se contente de déclencher chaque
+// itération. Auto-contenu (recalcule N et les degrés sortants à chaque appel) :
+// simple, largement assez rapide à l'échelle de cet index (des centaines/
+// milliers de pages, pas des milliards — pas besoin d'un Map-Reduce distribué).
+//
+// Copyright (c) Bastien LANGUEDOC / Noliae.
+
+fn pagerank_db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
+
+// Une itération de puissance : rang(u) = (1-d)/N + d * somme(rang(v)/sortants(v))
+// pour chaque page v qui pointe vers u. d=0.85 (valeur historique du papier
+// Brin/Page). Les CTE (total, outdeg, apport) sont évaluées UNE FOIS au début
+// de la commande (sémantique MVCC de Postgres pour une requête unique) : donc
+// tous les rang(v) lus sont bien ceux de l'itération PRÉCÉDENTE, jamais un
+// mélange ancien/nouveau — c'est ce qui rend chaque appel une vraie itération
+// de puissance et pas un calcul incohérent.
+fn pagerank_iteration(db: Ptr<PgConn>) -> Bool {
+    let sql = "WITH total AS (SELECT GREATEST(count(*),1)::float8 AS n FROM public_search_documents), "
+        + "outdeg AS (SELECT from_url, count(*)::float8 AS n FROM search_links GROUP BY from_url), "
+        + "apport AS ("
+        + "  SELECT l.to_url AS url, SUM(src.rang / od.n) AS somme"
+        + "  FROM search_links l"
+        + "  JOIN public_search_documents src ON src.url = l.from_url"
+        + "  JOIN outdeg od ON od.from_url = l.from_url"
+        + "  GROUP BY l.to_url"
+        + ") "
+        + "UPDATE public_search_documents d "
+        + "SET rang = (SELECT 0.15/n FROM total) + 0.85 * COALESCE((SELECT somme FROM apport WHERE apport.url = d.url), 0)"
+    let res = pg_requete(db, sql)
+    if not has(res) { return false }
+    pg_liberer(unwrap_or(res, ptr_null()))
+    return true
+}
+
+// 25 itérations convergent largement pour un graphe de cette taille (un
+// graphe de liens web réel converge déjà en ~15-20 passes dans la pratique
+// académique courante ; on prend une marge).
+fn pagerank_worker() {
+    let conn = pagerank_db()
+    if not has(conn) { return }
+    let db = unwrap_or(conn, ptr_null())
+    var i = 0
+    while i < 25 {
+        if not pagerank_iteration(db) { i = 25 } else { i = i + 1 }
+    }
+    pg_fermer(db)
+}

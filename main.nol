@@ -9,6 +9,7 @@ import "auth.nol"
 import "webauthn.nol"
 import "redis.nol"
 import "s3.nol"
+import "pagerank.nol"
 
 fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
 
@@ -678,7 +679,13 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     }
     // Sans document privé (ou visiteur anonyme), consulter l'index public
     // construit par le crawler.
-    let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,image,content,'crawler' AS source, count(*) OVER() AS total FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank_cd(search_vector,plainto_tsquery('french',$1)) DESC, crawled_at DESC LIMIT $2 OFFSET $3", [unwrap_or(q, ""),text(limit),text(offset)])
+    // Classement = pertinence texte (ts_rank_cd) * autorité de lien (rang,
+    // notre PageRank maison — voir pagerank.nol). Comme l'algorithme
+    // originel de Google : le texte seul décide QUELS documents matchent,
+    // mais parmi eux, ceux cités par des pages elles-mêmes autoritaires
+    // remontent. `rang` vaut au moins 0.15/N (jamais 0), donc il pondère
+    // sans jamais faire disparaître un document sans lien entrant connu.
+    let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,image,content,'crawler' AS source, count(*) OVER() AS total FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank_cd(search_vector,plainto_tsquery('french',$1)) * rang DESC, crawled_at DESC LIMIT $2 OFFSET $3", [unwrap_or(q, ""),text(limit),text(offset)])
     if not has(public_res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
     let public_sortie = unwrap_or(public_res, ptr_null())
     items = "["
@@ -1678,6 +1685,7 @@ fn core_ia_stream(client: Int, raw: Text) {
 }
 
 fn main() {
+    if lower(unwrap_or(env("NOLCORE_PAGERANK_WORKER"), "false")) == "true" { pagerank_worker(); return }
     let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
     if len(secret) < 32 { print("NOLIAE_SESSION_SECRET doit contenir au moins 32 caracteres"); return }
     let port = unwrap_or(parse_int(unwrap_or(env("NOLIAE_PORT"), "8080")), 8080)

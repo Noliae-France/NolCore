@@ -17,6 +17,10 @@ ALTER TABLE public_search_documents ADD COLUMN IF NOT EXISTS canonical_url TEXT 
 ALTER TABLE public_search_documents ADD COLUMN IF NOT EXISTS image TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS search_crawl_queue (url TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','crawling','complete','failed')), attempts INTEGER NOT NULL DEFAULT 0, requested_at TIMESTAMPTZ NOT NULL DEFAULT now(), started_at TIMESTAMPTZ, crawled_at TIMESTAMPTZ, last_error TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS search_crawl_queue_pending_idx ON search_crawl_queue(status, requested_at);
+ALTER TABLE public_search_documents ADD COLUMN IF NOT EXISTS rang DOUBLE PRECISION NOT NULL DEFAULT 0.15;
+CREATE TABLE IF NOT EXISTS search_links (from_url TEXT NOT NULL, to_url TEXT NOT NULL, PRIMARY KEY(from_url, to_url));
+CREATE INDEX IF NOT EXISTS search_links_to_idx ON search_links(to_url);
+CREATE INDEX IF NOT EXISTS search_links_from_idx ON search_links(from_url);
 CREATE TABLE IF NOT EXISTS crawler_hosts (host TEXT PRIMARY KEY, crawl_delay_seconds INTEGER NOT NULL DEFAULT 5, next_allowed_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_error TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS permissions (code TEXT PRIMARY KEY, description TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS user_permissions (user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, permission_code TEXT REFERENCES permissions(code) ON DELETE CASCADE, PRIMARY KEY(user_id, permission_code));
