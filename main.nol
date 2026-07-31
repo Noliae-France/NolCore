@@ -308,6 +308,75 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     return WebResultat.WebOk(reponse_json("{\"conversation_id\":" + json_texte(conv_id) + ",\"answer\":" + json_texte(answer) + "}"))
 }
 
+// Historique des conversations IA : liste (sidebar), messages d'une
+// conversation, suppression. Les messages sont déjà persistés par
+// api_chat ; ces routes permettent simplement de les relire/gérer.
+fn api_conversations(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT id,title,provider,model,created_at FROM conversations WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100", [unwrap_or(id,"")])
+    if not has(res) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Historique indisponible.",req) }
+    let sortie = unwrap_or(res,ptr_null())
+    var items = "["
+    var i = 0
+    while i < pg_lignes(sortie) {
+        if i > 0 { items += "," }
+        items += "{\"id\":" + json_texte(unwrap_or(pg_valeur(sortie,i,0),"")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(sortie,i,1),"")) + ",\"provider\":" + json_texte(unwrap_or(pg_valeur(sortie,i,2),"")) + ",\"model\":" + json_texte(unwrap_or(pg_valeur(sortie,i,3),"")) + ",\"created_at\":" + json_texte(unwrap_or(pg_valeur(sortie,i,4),"")) + "}"
+        i = i + 1
+    }
+    items += "]"
+    pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null()))
+    return WebResultat.WebOk(reponse_json(items))
+}
+
+fn api_conversation_messages(req: Requete, params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let conv_id = parametre(params, "id")
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let db_conn = unwrap_or(conn,ptr_null())
+    // La jointure sur user_id garantit qu'un utilisateur ne peut lire que ses
+    // propres conversations, même en devinant un autre id numérique.
+    let res = pg_requete_params(db_conn, "SELECT m.role,m.content,m.created_at FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.id=$1 AND c.user_id=$2 ORDER BY m.id ASC", [conv_id, unwrap_or(id,"")])
+    if not has(res) { pg_fermer(db_conn); return erreur_json(500,"Internal Server Error","Messages indisponibles.",req) }
+    let sortie = unwrap_or(res,ptr_null())
+    if pg_lignes(sortie) == 0 {
+        // Distingue "conversation vide" de "conversation inexistante/pas la vôtre".
+        let owned = pg_requete_params(db_conn, "SELECT id FROM conversations WHERE id=$1 AND user_id=$2", [conv_id, unwrap_or(id,"")])
+        let existe = has(owned) and pg_lignes(unwrap_or(owned,ptr_null())) == 1
+        if has(owned) { pg_liberer(unwrap_or(owned,ptr_null())) }
+        if not existe { pg_liberer(sortie); pg_fermer(db_conn); return erreur_json(404,"Not Found","Conversation introuvable.",req) }
+    }
+    var items = "["
+    var i = 0
+    while i < pg_lignes(sortie) {
+        if i > 0 { items += "," }
+        items += "{\"role\":" + json_texte(unwrap_or(pg_valeur(sortie,i,0),"")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(sortie,i,1),"")) + ",\"created_at\":" + json_texte(unwrap_or(pg_valeur(sortie,i,2),"")) + "}"
+        i = i + 1
+    }
+    items += "]"
+    pg_liberer(sortie); pg_fermer(db_conn)
+    return WebResultat.WebOk(reponse_json(items))
+}
+
+fn api_conversation_supprimer(req: Requete, params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let conv_id = parametre(params, "id")
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let db_conn = unwrap_or(conn,ptr_null())
+    let res = pg_requete_params(db_conn, "DELETE FROM conversations WHERE id=$1 AND user_id=$2 RETURNING id", [conv_id, unwrap_or(id,"")])
+    if not has(res) { pg_fermer(db_conn); return erreur_json(500,"Internal Server Error","Suppression impossible.",req) }
+    let supprime = pg_lignes(unwrap_or(res,ptr_null())) == 1
+    pg_liberer(unwrap_or(res,ptr_null())); pg_fermer(db_conn)
+    if not supprime { return erreur_json(404,"Not Found","Conversation introuvable.",req) }
+    return WebResultat.WebOk(reponse_json("{\"deleted\":true}"))
+}
+
 fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
     let email = champ_entree(req, "email")
     let mot = champ_entree(req, "password")
@@ -1208,6 +1277,9 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "GET", "/v1/user", api_me)
     route_type(methodes, patrons, handlers, "GET", "/v1/ia", api_chat)
     route_type(methodes, patrons, handlers, "POST", "/v1/ia", api_chat)
+    route_type(methodes, patrons, handlers, "GET", "/v1/conversations", api_conversations)
+    route_type(methodes, patrons, handlers, "GET", "/v1/conversations/:id/messages", api_conversation_messages)
+    route_type(methodes, patrons, handlers, "DELETE", "/v1/conversations/:id", api_conversation_supprimer)
     route_type(methodes, patrons, handlers, "GET", "/v1/search", api_search)
     route_type(methodes, patrons, handlers, "GET", "/v1/perms", api_permissions)
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/users", api_admin_users)
