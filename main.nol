@@ -281,6 +281,8 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
         let conversation = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO conversations(user_id,title,provider,model) VALUES($1,$2,$3,$4) RETURNING id,public_id", [unwrap_or(id,""), titre,fournisseur,modele])
         if not has(conversation) { pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(500,"Internal Server Error","Création de conversation impossible.",req) }
         let conv = unwrap_or(conversation, ptr_null()); conv_internal = unwrap_or(pg_valeur(conv,0,0),""); conv_public = unwrap_or(pg_valeur(conv,0,1),""); pg_liberer(conv)
+    } else if not est_uuid(conv_public) {
+        pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(404,"Not Found","Conversation introuvable.",req)
     } else {
         let owned = pg_requete_params(unwrap_or(conn,ptr_null()),"SELECT id FROM conversations WHERE public_id=$1::uuid AND user_id=$2",[conv_public,unwrap_or(id,"")])
         if not has(owned) or pg_lignes(unwrap_or(owned,ptr_null())) != 1 { if has(owned) { pg_liberer(unwrap_or(owned,ptr_null())) }; pg_fermer(unwrap_or(conn,ptr_null())); return erreur_json(404,"Not Found","Conversation introuvable.",req) }
@@ -340,6 +342,7 @@ fn api_conversation_messages(req: Requete, params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
     if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
     let conv_id = parametre(params, "id")
+    if not est_uuid(conv_id) { return erreur_json(404, "Not Found", "Conversation introuvable.", req) }
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
     let db_conn = unwrap_or(conn,ptr_null())
@@ -371,6 +374,7 @@ fn api_conversation_supprimer(req: Requete, params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
     if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
     let conv_id = parametre(params, "id")
+    if not est_uuid(conv_id) { return erreur_json(404, "Not Found", "Conversation introuvable.", req) }
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
     let db_conn = unwrap_or(conn,ptr_null())
@@ -928,6 +932,24 @@ fn api_permissions(req: Requete, _params: Map<Text>) -> WebResultat {
 }
 
 fn parametre(params: Map<Text>, nom: Text) -> Text { return unwrap_or(map_get(params, nom), "") }
+// Valide le format UUID AVANT toute requête ::uuid : sans ça, un id hérité
+// d'avant la migration (ancien id numérique en cache navigateur) fait
+// échouer le cast SQL, et la requête ratée était traitée comme une panne
+// serveur (500) au lieu d'un simple « conversation introuvable » (404).
+fn est_uuid(v: Text) -> Bool {
+    if len(v) != 36 { return false }
+    var i = 0
+    while i < 36 {
+        let c = sub(v, i, 1)
+        if i == 8 or i == 13 or i == 18 or i == 23 {
+            if c != "-" { return false }
+        } else if not contains("0123456789abcdefABCDEF", c) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
 
 fn api_ia_modele(req: Requete, params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
