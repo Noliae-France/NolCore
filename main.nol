@@ -1090,6 +1090,8 @@ fn search_ia_provider() -> Text {
     if unwrap_or(env("NOLCORE_CLAUDE_TOKEN"),"") != "" { return "claude" }
     if unwrap_or(env("NOLCORE_MISTRAL_TOKEN"),"") != "" { return "mistral" }
     if unwrap_or(env("NOLCORE_GEMINI_TOKEN"),"") != "" { return "gemini" }
+    if unwrap_or(env("NOLCORE_GROK_TOKEN"),"") != "" { return "grok" }
+    if unwrap_or(env("NOLCORE_DEEPSEEK_TOKEN"),"") != "" { return "deepseek" }
     return unwrap_or(env("NOLCORE_DEFAULT_PROVIDER"),"chatgpt")
 }
 fn search_ia_modele(provider: Text) -> Text {
@@ -1097,6 +1099,8 @@ fn search_ia_modele(provider: Text) -> Text {
     if provider == "claude" { return "claude-3-5-sonnet-latest" }
     if provider == "mistral" { return "mistral-small-latest" }
     if provider == "gemini" { return "gemini-1.5-flash" }
+    if provider == "grok" { return "grok-3-mini" }
+    if provider == "deepseek" { return "deepseek-chat" }
     return unwrap_or(env("NOLCORE_DEFAULT_MODEL"),"gpt-4o-mini")
 }
 // Recherche « Réponse IA » : le front attend un TABLEAU de résultats
