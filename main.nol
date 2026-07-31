@@ -275,6 +275,7 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     // conv_internal est le BIGINT interne, seul utilisable pour les FK
     // messages.conversation_id / ai_usage.conversation_id.
     var conv_public = unwrap_or(json_texte_champ(unwrap_or(corps,""),"conversation_id"),"")
+    let conv_est_nouvelle = conv_public == ""
     var conv_internal = ""
     if conv_public == "" {
         var titre = unwrap_or(message, ""); if len(titre) > 80 { titre = sub(titre, 0, 80) }
@@ -312,6 +313,10 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
     let cost = pg_requete_params(unwrap_or(conn,ptr_null()),"INSERT INTO ai_usage(user_id,conversation_id,provider,model,input_chars,output_chars,estimated_cost_micros) VALUES($1,$2,$3,$4,$5,$6,$7)",[unwrap_or(id,""),conv_internal,fournisseur,modele,text(input_tokens),text(output_tokens),text(estimated_cost)])
     if has(cost) { pg_liberer(unwrap_or(cost,ptr_null())) }
     pg_fermer(unwrap_or(conn, ptr_null()))
+    // Le nouveau message rend le cache de cette conversation (et, si elle
+    // vient d'être créée, la liste des conversations) périmé immédiatement.
+    cache_del("convmsgs:" + conv_public + ":" + unwrap_or(id,""))
+    if conv_est_nouvelle { cache_del("convs:" + unwrap_or(id,"")) }
     return WebResultat.WebOk(reponse_json("{\"conversation_id\":" + json_texte(conv_public) + ",\"answer\":" + json_texte(answer) + "}"))
 }
 
@@ -321,6 +326,13 @@ fn api_chat(req: Requete, _params: Map<Text>) -> WebResultat {
 fn api_conversations(req: Requete, _params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
     if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    // Liste re-demandée à chaque frappe/ouverture de la sidebar : un TTL
+    // court suffit à éviter l'aller-retour PostgreSQL systématique sans
+    // risquer un affichage périmé longtemps (invalidée de toute façon dès
+    // qu'une conversation est créée/supprimée, voir cache_del ci-dessous).
+    let cache_key_convs = "convs:" + unwrap_or(id,"")
+    let cached_convs = cache_get(cache_key_convs)
+    if has(cached_convs) { return WebResultat.WebOk(reponse_json(unwrap_or(cached_convs,"[]"))) }
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
     let res = pg_requete_params(unwrap_or(conn,ptr_null()), "SELECT public_id,title,provider,model,created_at FROM conversations WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100", [unwrap_or(id,"")])
@@ -335,6 +347,7 @@ fn api_conversations(req: Requete, _params: Map<Text>) -> WebResultat {
     }
     items += "]"
     pg_liberer(sortie); pg_fermer(unwrap_or(conn,ptr_null()))
+    cache_set(cache_key_convs, 20, items)
     return WebResultat.WebOk(reponse_json(items))
 }
 
@@ -343,6 +356,14 @@ fn api_conversation_messages(req: Requete, params: Map<Text>) -> WebResultat {
     if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
     let conv_id = parametre(params, "id")
     if not est_uuid(conv_id) { return erreur_json(404, "Not Found", "Conversation introuvable.", req) }
+    // Contenu d'une conversation entière : quasi jamais modifié après coup
+    // (sauf nouveau message, qui invalide explicitement cette clé), donc un
+    // cache Redis évite de re-payer la jointure PostgreSQL à chaque
+    // ouverture/refresh — c'est ce qui rendait la réouverture perceptiblement
+    // lente même pour une conversation de quelques lignes.
+    let cache_key_msgs = "convmsgs:" + conv_id + ":" + unwrap_or(id,"")
+    let cached_msgs = cache_get(cache_key_msgs)
+    if has(cached_msgs) { return WebResultat.WebOk(reponse_json(unwrap_or(cached_msgs,"[]"))) }
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
     let db_conn = unwrap_or(conn,ptr_null())
@@ -367,6 +388,7 @@ fn api_conversation_messages(req: Requete, params: Map<Text>) -> WebResultat {
     }
     items += "]"
     pg_liberer(sortie); pg_fermer(db_conn)
+    cache_set(cache_key_msgs, 60, items)
     return WebResultat.WebOk(reponse_json(items))
 }
 
@@ -383,7 +405,75 @@ fn api_conversation_supprimer(req: Requete, params: Map<Text>) -> WebResultat {
     let supprime = pg_lignes(unwrap_or(res,ptr_null())) == 1
     pg_liberer(unwrap_or(res,ptr_null())); pg_fermer(db_conn)
     if not supprime { return erreur_json(404,"Not Found","Conversation introuvable.",req) }
+    cache_del("convmsgs:" + conv_id + ":" + unwrap_or(id,""))
+    cache_del("convs:" + unwrap_or(id,""))
     return WebResultat.WebOk(reponse_json("{\"deleted\":true}"))
+}
+
+// Partage public : bascule is_public, réservé au propriétaire. Le lien
+// partagé réutilise directement public_id (déjà un UUID imprévisible) comme
+// jeton — pas besoin d'un second secret, juste du flag qui autorise la
+// lecture SANS authentification.
+fn api_conversation_partager(req: Requete, params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let conv_id = parametre(params, "id")
+    if not est_uuid(conv_id) { return erreur_json(404, "Not Found", "Conversation introuvable.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let db_conn = unwrap_or(conn,ptr_null())
+    let res = pg_requete_params(db_conn, "UPDATE conversations SET is_public=true WHERE public_id=$1::uuid AND user_id=$2 RETURNING public_id", [conv_id, unwrap_or(id,"")])
+    if not has(res) { pg_fermer(db_conn); return erreur_json(500,"Internal Server Error","Partage impossible.",req) }
+    let ok = pg_lignes(unwrap_or(res,ptr_null())) == 1
+    pg_liberer(unwrap_or(res,ptr_null())); pg_fermer(db_conn)
+    if not ok { return erreur_json(404,"Not Found","Conversation introuvable.",req) }
+    return WebResultat.WebOk(reponse_json("{\"shared\":true,\"id\":" + json_texte(conv_id) + "}"))
+}
+fn api_conversation_departager(req: Requete, params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let conv_id = parametre(params, "id")
+    if not est_uuid(conv_id) { return erreur_json(404, "Not Found", "Conversation introuvable.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let db_conn = unwrap_or(conn,ptr_null())
+    let res = pg_requete_params(db_conn, "UPDATE conversations SET is_public=false WHERE public_id=$1::uuid AND user_id=$2 RETURNING public_id", [conv_id, unwrap_or(id,"")])
+    if not has(res) { pg_fermer(db_conn); return erreur_json(500,"Internal Server Error","Retrait du partage impossible.",req) }
+    let ok = pg_lignes(unwrap_or(res,ptr_null())) == 1
+    pg_liberer(unwrap_or(res,ptr_null())); pg_fermer(db_conn)
+    if not ok { return erreur_json(404,"Not Found","Conversation introuvable.",req) }
+    return WebResultat.WebOk(reponse_json("{\"shared\":false}"))
+}
+// Lecture publique SANS authentification : uniquement si is_public=true.
+// N'expose ni user_id, ni email, ni rien d'autre que titre/messages —
+// c'est un instantané en lecture seule, pas un accès à la conversation.
+fn api_conversation_publique(req: Requete, params: Map<Text>) -> WebResultat {
+    let conv_id = parametre(params, "id")
+    if not est_uuid(conv_id) { return erreur_json(404, "Not Found", "Conversation introuvable.", req) }
+    let conn = db()
+    if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
+    let db_conn = unwrap_or(conn,ptr_null())
+    let conv = pg_requete_params(db_conn, "SELECT id,title,provider,model FROM conversations WHERE public_id=$1::uuid AND is_public=true", [conv_id])
+    if not has(conv) or pg_lignes(unwrap_or(conv,ptr_null())) != 1 { if has(conv) { pg_liberer(unwrap_or(conv,ptr_null())) }; pg_fermer(db_conn); return erreur_json(404,"Not Found","Conversation introuvable ou non partagée.",req) }
+    let c = unwrap_or(conv,ptr_null())
+    let internal_id = unwrap_or(pg_valeur(c,0,0),"")
+    let titre = unwrap_or(pg_valeur(c,0,1),"")
+    let provider = unwrap_or(pg_valeur(c,0,2),"")
+    let modele = unwrap_or(pg_valeur(c,0,3),"")
+    pg_liberer(c)
+    let res = pg_requete_params(db_conn, "SELECT role,content,created_at FROM messages WHERE conversation_id=$1 ORDER BY id ASC", [internal_id])
+    if not has(res) { pg_fermer(db_conn); return erreur_json(500,"Internal Server Error","Messages indisponibles.",req) }
+    let sortie = unwrap_or(res,ptr_null())
+    var items = "["
+    var i = 0
+    while i < pg_lignes(sortie) {
+        if i > 0 { items += "," }
+        items += "{\"role\":" + json_texte(unwrap_or(pg_valeur(sortie,i,0),"")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(sortie,i,1),"")) + ",\"created_at\":" + json_texte(unwrap_or(pg_valeur(sortie,i,2),"")) + "}"
+        i = i + 1
+    }
+    items += "]"
+    pg_liberer(sortie); pg_fermer(db_conn)
+    return WebResultat.WebOk(reponse_json("{\"title\":" + json_texte(titre) + ",\"provider\":" + json_texte(provider) + ",\"model\":" + json_texte(modele) + ",\"messages\":" + items + "}"))
 }
 
 fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
@@ -467,6 +557,15 @@ fn cache_set(cle: Text, ttl: Int, valeur: Text) {
     if not has(oc) { return }
     let fd = unwrap_or(oc, -1)
     let _s = redis_setex(fd, "sc:" + cle, ttl, valeur)
+    redis_fermer(fd)
+}
+// Invalidation best-effort (best-effort aussi si Redis est down : le TTL
+// court de cache_set couvre alors le pire cas).
+fn cache_del(cle: Text) {
+    let oc = redis_env()
+    if not has(oc) { return }
+    let fd = unwrap_or(oc, -1)
+    let _d = redis_del(fd, "sc:" + cle)
     redis_fermer(fd)
 }
 
@@ -1311,6 +1410,9 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "GET", "/v1/conversations", api_conversations)
     route_type(methodes, patrons, handlers, "GET", "/v1/conversations/:id/messages", api_conversation_messages)
     route_type(methodes, patrons, handlers, "DELETE", "/v1/conversations/:id", api_conversation_supprimer)
+    route_type(methodes, patrons, handlers, "POST", "/v1/conversations/:id/share", api_conversation_partager)
+    route_type(methodes, patrons, handlers, "DELETE", "/v1/conversations/:id/share", api_conversation_departager)
+    route_type(methodes, patrons, handlers, "GET", "/v1/conversations/:id/public", api_conversation_publique)
     route_type(methodes, patrons, handlers, "GET", "/v1/search", api_search)
     route_type(methodes, patrons, handlers, "GET", "/v1/perms", api_permissions)
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/users", api_admin_users)
