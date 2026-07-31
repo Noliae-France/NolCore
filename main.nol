@@ -395,7 +395,10 @@ fn cache_set(cle: Text, ttl: Int, valeur: Text) {
 fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     let secret = unwrap_or(env("NOLIAE_SESSION_SECRET"), "")
     let id = utilisateur(req, secret)
-    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    // La recherche publique (index crawler + repli Brave) ne nécessite PAS de
+    // compte : seuls les documents PRIVÉS d'un utilisateur exigent une
+    // session. Un visiteur anonyme reçoit donc directement les résultats
+    // publics, sans jamais toucher à la table documents (owner_id).
     let q = requete_query(req, "q")
     if not has(q) or len(unwrap_or(q, "")) < 2 { return erreur_json(422, "Unprocessable Content", "q doit contenir au moins 2 caractères.", req) }
     var page = unwrap_or(parse_int(unwrap_or(requete_query(req,"page"),"1")),1)
@@ -405,12 +408,10 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     let offset = (page - 1) * limit
     let conn = db()
     if not has(conn) { return erreur_json(503, "Service Unavailable", "Base PostgreSQL indisponible.", req) }
-    // Cette route exige déjà une authentification (id ci-dessus) : on clé le
-    // débit sur l'utilisateur réel, pas sur X-Forwarded-For. Ce dernier n'est
-    // actuellement PAS transmis par le WAF (toujours vide) ; le garder comme
-    // clé aurait fait partager un seul quota global à tous les utilisateurs
-    // anonymes/authentifiés confondus (déni de service mutuel).
-    let cle_rate = unwrap_or(id, "anonymous")
+    // Débit par utilisateur réel si connecté ; sinon par IP (le WAF transmet
+    // désormais la vraie IP client dans X-Forwarded-For, plus un en-tête
+    // usurpable par le client comme avant sa correction).
+    let cle_rate = unwrap_or(id, "anon:" + unwrap_or(requete_entete(req, "X-Forwarded-For"), "anonymous"))
     // Anti-abus DISTRIBUÉ via Redis (partagé entre répliques), avec repli sur
     // le comptage PostgreSQL si Redis est indisponible (fail-open).
     let rl = redis_rate_ok("search:" + cle_rate, 60, 60)
@@ -428,69 +429,75 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
         pg_fermer(unwrap_or(conn, ptr_null()))
         return WebResultat.WebOk(reponse_avec_entete(reponse_json(unwrap_or(cached, "[]")), "X-Cache", "HIT"))
     }
-    let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,title,content, count(*) OVER() AS total FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank_cd(search_vector, plainto_tsquery('french',$2)) DESC LIMIT $3 OFFSET $4", [unwrap_or(id, ""), unwrap_or(q, ""),text(limit),text(offset)])
-    if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
-    let sortie = unwrap_or(res, ptr_null())
-    var items = "["
-    var i = 0
-    while i < pg_lignes(sortie) {
-        if i > 0 { items = items + "," }
-        items = items + "{\"id\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 0), "")) + ",\"url\":\"\",\"title\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 1), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 2), "")) + ",\"source\":\"private\"}"
-        i = i + 1
-    }
-    items = items + "]"
-    var total_priv = 0
-    if pg_lignes(sortie) > 0 { total_priv = unwrap_or(parse_int(unwrap_or(pg_valeur(sortie, 0, 3), "0")), 0) }
-    // Sans document privé, consulter l'index public construit par le crawler.
-    if pg_lignes(sortie) == 0 {
-        pg_liberer(sortie)
-        let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,content,'crawler' AS source, count(*) OVER() AS total FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank_cd(search_vector,plainto_tsquery('french',$1)) DESC, crawled_at DESC LIMIT $2 OFFSET $3", [unwrap_or(q, ""),text(limit),text(offset)])
-        if not has(public_res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
-        let public_sortie = unwrap_or(public_res, ptr_null())
+    var items = "[]"
+    var lignes_privees = 0
+    if has(id) {
+        let res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT id,title,content, count(*) OVER() AS total FROM documents WHERE owner_id=$1 AND search_vector @@ plainto_tsquery('french',$2) ORDER BY ts_rank_cd(search_vector, plainto_tsquery('french',$2)) DESC LIMIT $3 OFFSET $4", [unwrap_or(id, ""), unwrap_or(q, ""),text(limit),text(offset)])
+        if not has(res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
+        let sortie = unwrap_or(res, ptr_null())
         items = "["
-        i = 0
-        while i < pg_lignes(public_sortie) {
+        var i = 0
+        while i < pg_lignes(sortie) {
             if i > 0 { items = items + "," }
-            items = items + "{\"url\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 0), "")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 1), "")) + ",\"description\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 2), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 3), "")) + ",\"source\":\"crawler\"}"
+            items = items + "{\"id\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 0), "")) + ",\"url\":\"\",\"title\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 1), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(sortie, i, 2), "")) + ",\"source\":\"private\"}"
             i = i + 1
         }
         items = items + "]"
-        var total_public = 0
-        if pg_lignes(public_sortie) > 0 { total_public = unwrap_or(parse_int(unwrap_or(pg_valeur(public_sortie, 0, 5), "0")), 0) }
-        // Premier passage : Brave répond tout de suite et ses URL sont mises
-        // en file. Les passages suivants trouvent l'index local du crawler.
-        if pg_lignes(public_sortie) == 0 {
-            let brave_token = unwrap_or(env("NOLCORE_BRAVE_SEARCH_TOKEN"), "")
-            if brave_token != "" {
-            let brave = http_get_token("https://api.search.brave.com/res/v1/web/search?q=" + url_query_brave(unwrap_or(q,"")) + "&count=" + text(limit) + "&offset=" + text(offset) + "&country=FR&search_lang=fr", "X-Subscription-Token " + brave_token)
-            if has(brave) and unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 {
-                let corps_brave = unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"{}" }).corps
-                planifier_crawl_brave(unwrap_or(conn, ptr_null()), corps_brave)
-                items = unwrap_or(json_chemin(corps_brave, "web.results"), "[]")
-            } else { items = "[]" }
-            } else { items = "[]" }
+        lignes_privees = pg_lignes(sortie)
+        var total_priv = 0
+        if lignes_privees > 0 { total_priv = unwrap_or(parse_int(unwrap_or(pg_valeur(sortie, 0, 3), "0")), 0) }
+        pg_liberer(sortie)
+        if lignes_privees > 0 {
+            let _audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
+            if has(_audit) { pg_liberer(unwrap_or(_audit,ptr_null())) }
+            if items != "[]" { cache_set(cle_cache, 30, items) }
+            var tp_priv = 0
+            if limit > 0 { tp_priv = (total_priv + limit - 1) / limit }
+            var rep_priv = reponse_avec_entete(reponse_json(items), "X-Cache", "MISS")
+            rep_priv = reponse_avec_entete(rep_priv, "X-Total-Count", text(total_priv))
+            rep_priv = reponse_avec_entete(rep_priv, "X-Total-Pages", text(tp_priv))
+            pg_fermer(unwrap_or(conn, ptr_null()))
+            return WebResultat.WebOk(rep_priv)
         }
-        let _public_audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','public_search_documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
-        if has(_public_audit) { pg_liberer(unwrap_or(_public_audit,ptr_null())) }
-        if items != "[]" { cache_set(cle_cache, 30, items) }
-        var tp_pub = 0
-        if limit > 0 { tp_pub = (total_public + limit - 1) / limit }
-        var rep_pub = reponse_avec_entete(reponse_json(items), "X-Cache", "MISS")
-        rep_pub = reponse_avec_entete(rep_pub, "X-Total-Count", text(total_public))
-        rep_pub = reponse_avec_entete(rep_pub, "X-Total-Pages", text(tp_pub))
-        pg_liberer(public_sortie); pg_fermer(unwrap_or(conn, ptr_null()))
-        return WebResultat.WebOk(rep_pub)
     }
-    let _audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
-    if has(_audit) { pg_liberer(unwrap_or(_audit,ptr_null())) }
+    // Sans document privé (ou visiteur anonyme), consulter l'index public
+    // construit par le crawler.
+    let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,content,'crawler' AS source, count(*) OVER() AS total FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank_cd(search_vector,plainto_tsquery('french',$1)) DESC, crawled_at DESC LIMIT $2 OFFSET $3", [unwrap_or(q, ""),text(limit),text(offset)])
+    if not has(public_res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
+    let public_sortie = unwrap_or(public_res, ptr_null())
+    items = "["
+    var i = 0
+    while i < pg_lignes(public_sortie) {
+        if i > 0 { items = items + "," }
+        items = items + "{\"url\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 0), "")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 1), "")) + ",\"description\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 2), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 3), "")) + ",\"source\":\"crawler\"}"
+        i = i + 1
+    }
+    items = items + "]"
+    var total_public = 0
+    if pg_lignes(public_sortie) > 0 { total_public = unwrap_or(parse_int(unwrap_or(pg_valeur(public_sortie, 0, 5), "0")), 0) }
+    // Premier passage : Brave répond tout de suite et ses URL sont mises
+    // en file. Les passages suivants trouvent l'index local du crawler.
+    if pg_lignes(public_sortie) == 0 {
+        let brave_token = unwrap_or(env("NOLCORE_BRAVE_SEARCH_TOKEN"), "")
+        if brave_token != "" {
+        let brave = http_get_token("https://api.search.brave.com/res/v1/web/search?q=" + url_query_brave(unwrap_or(q,"")) + "&count=" + text(limit) + "&offset=" + text(offset) + "&country=FR&search_lang=fr", "X-Subscription-Token " + brave_token)
+        if has(brave) and unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"" }).statut < 300 {
+            let corps_brave = unwrap_or(brave, ReponseHttp { statut:0, entetes:"", corps:"{}" }).corps
+            planifier_crawl_brave(unwrap_or(conn, ptr_null()), corps_brave)
+            items = unwrap_or(json_chemin(corps_brave, "web.results"), "[]")
+        } else { items = "[]" }
+        } else { items = "[]" }
+    }
+    let _public_audit = pg_requete_params(unwrap_or(conn, ptr_null()), "INSERT INTO audit_logs(user_id,action,resource,metadata) VALUES($1,'search','public_search_documents',jsonb_build_object('key',$2))", [unwrap_or(id,""), cle_rate])
+    if has(_public_audit) { pg_liberer(unwrap_or(_public_audit,ptr_null())) }
     if items != "[]" { cache_set(cle_cache, 30, items) }
-    var tp_priv = 0
-    if limit > 0 { tp_priv = (total_priv + limit - 1) / limit }
-    var rep_priv = reponse_avec_entete(reponse_json(items), "X-Cache", "MISS")
-    rep_priv = reponse_avec_entete(rep_priv, "X-Total-Count", text(total_priv))
-    rep_priv = reponse_avec_entete(rep_priv, "X-Total-Pages", text(tp_priv))
-    pg_liberer(sortie); pg_fermer(unwrap_or(conn, ptr_null()))
-    return WebResultat.WebOk(rep_priv)
+    var tp_pub = 0
+    if limit > 0 { tp_pub = (total_public + limit - 1) / limit }
+    var rep_pub = reponse_avec_entete(reponse_json(items), "X-Cache", "MISS")
+    rep_pub = reponse_avec_entete(rep_pub, "X-Total-Count", text(total_public))
+    rep_pub = reponse_avec_entete(rep_pub, "X-Total-Pages", text(tp_pub))
+    pg_liberer(public_sortie); pg_fermer(unwrap_or(conn, ptr_null()))
+    return WebResultat.WebOk(rep_pub)
 }
 
 fn api_me(req: Requete, _params: Map<Text>) -> WebResultat {
