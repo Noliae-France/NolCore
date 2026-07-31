@@ -1,0 +1,94 @@
+// Client S3 minimal (OVH Object Storage, compatible AWS S3) en pur Nolc —
+// génération d'URL PRÉSIGNÉES uniquement (PAS d'upload via ce backend).
+//
+// POURQUOI présigné et pas un PUT direct depuis le serveur : la stdlib TLS de
+// Nolc (lib/tls.nol) n'expose que tls_ecrire(Text) — un corps binaire (image)
+// y perdrait des octets au passage par un décodage UTF-8 lossy. Signer une URL
+// presignée est un calcul texte pur (aucune donnée binaire ne transite par ce
+// serveur) : le NAVIGATEUR fait le PUT direct vers S3 avec les octets bruts du
+// fichier. Plus simple, plus sûr, et deux fois moins de bande passante.
+//
+// AUCUN identifiant en dur : tout vient de l'environnement (S3_ACCESS_KEY,
+// S3_SECRET_KEY, ...), jamais commité.
+//
+// Copyright (c) Bastien LANGUEDOC / Noliae.
+// Pas d'import ici : compilé avec main.nol, qui importe déjà crypto.nol et
+// temps.nol (voir les autres fichiers du projet, ex. redis.nol/auth.nol —
+// même convention, un second import du même module fait "définie deux fois").
+
+record ConfS3 {
+    hote: Text,     // ex. s3.gra.io.cloud.ovh.net
+    region_: Text,  // ex. gra
+    bucket: Text,   // ex. noliae-ia-uploads
+    acces: Text,
+    secret: Text
+}
+
+// Charge la config S3 depuis l'env. none si un champ obligatoire manque
+// (l'appelant dégrade alors proprement : upload d'image désactivé).
+fn s3_conf() -> Option<ConfS3> {
+    let hote = unwrap_or(env("S3_ENDPOINT_HOST"), "")
+    var region_ = unwrap_or(env("S3_REGION"), "")
+    if region_ == "" { region_ = "gra" }
+    let bucket = unwrap_or(env("S3_BUCKET"), "")
+    let acces = unwrap_or(env("S3_ACCESS_KEY"), "")
+    let secret = unwrap_or(env("S3_SECRET_KEY"), "")
+    if hote == "" or bucket == "" or acces == "" or secret == "" { return none }
+    return some(ConfS3 { hote: hote, region_: region_, bucket: bucket, acces: acces, secret: secret })
+}
+
+fn s3_amzdate(d: Date) -> Text {
+    return zero_tete(d.annee, 4) + zero_tete(d.mois, 2) + zero_tete(d.jour, 2)
+        + "T" + zero_tete(d.heure, 2) + zero_tete(d.minute, 2) + zero_tete(d.seconde, 2) + "Z"
+}
+
+fn s3_datestamp(d: Date) -> Text {
+    return zero_tete(d.annee, 4) + zero_tete(d.mois, 2) + zero_tete(d.jour, 2)
+}
+
+fn s3_cle_signature(secret: Text, datestamp: Text, region_: Text, service: Text) -> Bytes {
+    let k0 = bytes_from_text("AWS4" + secret)
+    let k1 = hmac_sha256(k0, bytes_from_text(datestamp))
+    let k2 = hmac_sha256(k1, bytes_from_text(region_))
+    let k3 = hmac_sha256(k2, bytes_from_text(service))
+    return hmac_sha256(k3, bytes_from_text("aws4_request"))
+}
+
+// URL publique d'un objet déposé (path-style). S3_PUBLIC_BASE surcharge (ex.
+// CDN devant le bucket) ; sinon https://<host>/<bucket>/<clé>.
+fn s3_url_publique(conf: ConfS3, cle_objet: Text) -> Text {
+    let base = unwrap_or(env("S3_PUBLIC_BASE"), "")
+    if base != "" { return base + "/" + cle_objet }
+    return "https://" + conf.hote + "/" + conf.bucket + "/" + cle_objet
+}
+
+// URL PUT présignée (SigV4 query-string signing), valide `expire_s` secondes.
+// `cle_objet` NE doit PAS commencer par '/'. Le navigateur DOIT envoyer
+// exactement l'en-tête `x-amz-acl: public-read` sur le PUT (il fait partie
+// des en-têtes signés) : c'est ce qui rend l'objet lisible publiquement sans
+// policy de bucket à part (ACL par objet, cf. mémo infra S3 OVH).
+fn s3_presigner_put(conf: ConfS3, cle_objet: Text, expire_s: Int, d: Date) -> Text {
+    let amzdate = s3_amzdate(d)
+    let datestamp = s3_datestamp(d)
+    let scope = datestamp + "/" + conf.region_ + "/s3/aws4_request"
+    // Seul '/' apparaît dans ces valeurs (clé alphanumérique + '/'), donc un
+    // remplacement ciblé suffit — pas besoin d'un encodeur URL générique.
+    let credential = replace(conf.acces + "/" + scope, "/", "%2F")
+    let uri = "/" + conf.bucket + "/" + cle_objet
+    let qs = "X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        + "&X-Amz-Credential=" + credential
+        + "&X-Amz-Date=" + amzdate
+        + "&X-Amz-Expires=" + text(expire_s)
+        + "&X-Amz-SignedHeaders=host%3Bx-amz-acl"
+
+    let entetes_canon = "host:" + conf.hote + "\n" + "x-amz-acl:public-read\n"
+    let signes = "host;x-amz-acl"
+    let requete_canon = "PUT\n" + uri + "\n" + qs + "\n" + entetes_canon + "\n" + signes + "\nUNSIGNED-PAYLOAD"
+    let hash_requete = sha256_hex(bytes_from_text(requete_canon))
+
+    let a_signer = "AWS4-HMAC-SHA256\n" + amzdate + "\n" + scope + "\n" + hash_requete
+    let cle = s3_cle_signature(conf.secret, datestamp, conf.region_, "s3")
+    let signature = hex_encode(hmac_sha256(cle, bytes_from_text(a_signer)))
+
+    return "https://" + conf.hote + uri + "?" + qs + "&X-Amz-Signature=" + signature
+}

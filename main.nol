@@ -8,6 +8,7 @@ import "smtp.nol"
 import "auth.nol"
 import "webauthn.nol"
 import "redis.nol"
+import "s3.nol"
 
 fn db() -> Option<Ptr<PgConn>> { return pg_ouvrir(unwrap_or(env("NOLCORE_DATABASE_URL"), "")) }
 
@@ -474,6 +475,44 @@ fn api_conversation_publique(req: Requete, params: Map<Text>) -> WebResultat {
     items += "]"
     pg_liberer(sortie); pg_fermer(db_conn)
     return WebResultat.WebOk(reponse_json("{\"title\":" + json_texte(titre) + ",\"provider\":" + json_texte(provider) + ",\"model\":" + json_texte(modele) + ",\"messages\":" + items + "}"))
+}
+
+// Extension sûre pour un content-type image whitelisté (jamais dérivée du nom
+// de fichier client : évite qu'un ".php"/chemin quelconque se retrouve dans
+// la clé S3). Vide = type non supporté -> upload refusé.
+fn s3_extension_image(content_type: Text) -> Text {
+    let ct = lower(content_type)
+    if ct == "image/png" { return "png" }
+    if ct == "image/jpeg" or ct == "image/jpg" { return "jpg" }
+    if ct == "image/webp" { return "webp" }
+    if ct == "image/gif" { return "gif" }
+    return ""
+}
+
+// Présigne une URL de dépôt S3 pour une image que le NAVIGATEUR uploade
+// directement (voir s3.nol pour le pourquoi). Ne touche jamais aux octets de
+// l'image : ce endpoint ne fait QUE signer une URL, aucune donnée binaire ne
+// transite par ce serveur.
+fn api_upload_presign(req: Requete, _params: Map<Text>) -> WebResultat {
+    let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
+    if not has(id) { return erreur_json(401, "Unauthorized", "Authentification requise.", req) }
+    let conf = s3_conf()
+    if not has(conf) { return erreur_json(503, "Service Unavailable", "Stockage d'images non configuré.", req) }
+    let rl = redis_rate_ok("upload:" + unwrap_or(id,""), 20, 3600)
+    if has(rl) and not unwrap_or(rl,true) { return erreur_json(429,"Too Many Requests","Trop d'imports d'images cette heure.",req) }
+    let corps = requete_json(req)
+    if not has(corps) { return erreur_json(400, "Bad Request", "JSON invalide.", req) }
+    let content_type = unwrap_or(json_texte_champ(unwrap_or(corps,""),"content_type"),"")
+    let ext = s3_extension_image(content_type)
+    if ext == "" { return erreur_json(422, "Unprocessable Content", "Type d'image non supporté (png, jpg, webp, gif).", req) }
+    let nom = unwrap_or(random_hex(16), "")
+    if nom == "" { return erreur_json(500,"Internal Server Error","Génération de clé impossible.",req) }
+    let cle = "chat-uploads/" + unwrap_or(id,"") + "/" + nom + "." + ext
+    let c = unwrap_or(conf, ConfS3 { hote:"", region_:"", bucket:"", acces:"", secret:"" })
+    let d = epoch_vers_date(maintenant_epoch())
+    let upload_url = s3_presigner_put(c, cle, 300, d)
+    let public_url = s3_url_publique(c, cle)
+    return WebResultat.WebOk(reponse_json("{\"upload_url\":" + json_texte(upload_url) + ",\"public_url\":" + json_texte(public_url) + ",\"key\":" + json_texte(cle) + "}"))
 }
 
 fn api_login(req: Requete, _params: Map<Text>) -> WebResultat {
@@ -1413,6 +1452,7 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "POST", "/v1/conversations/:id/share", api_conversation_partager)
     route_type(methodes, patrons, handlers, "DELETE", "/v1/conversations/:id/share", api_conversation_departager)
     route_type(methodes, patrons, handlers, "GET", "/v1/conversations/:id/public", api_conversation_publique)
+    route_type(methodes, patrons, handlers, "POST", "/v1/uploads/presign", api_upload_presign)
     route_type(methodes, patrons, handlers, "GET", "/v1/search", api_search)
     route_type(methodes, patrons, handlers, "GET", "/v1/perms", api_permissions)
     route_type(methodes, patrons, handlers, "GET", "/v1/admin/users", api_admin_users)
