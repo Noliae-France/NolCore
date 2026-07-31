@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS public_search_documents (id BIGSERIAL PRIMARY KEY, ur
 CREATE INDEX IF NOT EXISTS public_search_documents_search_idx ON public_search_documents USING GIN(search_vector);
 ALTER TABLE public_search_documents ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
 ALTER TABLE public_search_documents ADD COLUMN IF NOT EXISTS canonical_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE public_search_documents ADD COLUMN IF NOT EXISTS image TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS search_crawl_queue (url TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','crawling','complete','failed')), attempts INTEGER NOT NULL DEFAULT 0, requested_at TIMESTAMPTZ NOT NULL DEFAULT now(), started_at TIMESTAMPTZ, crawled_at TIMESTAMPTZ, last_error TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS search_crawl_queue_pending_idx ON search_crawl_queue(status, requested_at);
 CREATE TABLE IF NOT EXISTS crawler_hosts (host TEXT PRIMARY KEY, crawl_delay_seconds INTEGER NOT NULL DEFAULT 5, next_allowed_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_error TEXT NOT NULL DEFAULT '');

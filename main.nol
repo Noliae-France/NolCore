@@ -462,19 +462,19 @@ fn api_search(req: Requete, _params: Map<Text>) -> WebResultat {
     }
     // Sans document privé (ou visiteur anonyme), consulter l'index public
     // construit par le crawler.
-    let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,content,'crawler' AS source, count(*) OVER() AS total FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank_cd(search_vector,plainto_tsquery('french',$1)) DESC, crawled_at DESC LIMIT $2 OFFSET $3", [unwrap_or(q, ""),text(limit),text(offset)])
+    let public_res = pg_requete_params(unwrap_or(conn, ptr_null()), "SELECT url,title,description,image,content,'crawler' AS source, count(*) OVER() AS total FROM public_search_documents WHERE search_vector @@ plainto_tsquery('french',$1) ORDER BY ts_rank_cd(search_vector,plainto_tsquery('french',$1)) DESC, crawled_at DESC LIMIT $2 OFFSET $3", [unwrap_or(q, ""),text(limit),text(offset)])
     if not has(public_res) { pg_fermer(unwrap_or(conn, ptr_null())); return erreur_json(500, "Internal Server Error", "Recherche indisponible.", req) }
     let public_sortie = unwrap_or(public_res, ptr_null())
     items = "["
     var i = 0
     while i < pg_lignes(public_sortie) {
         if i > 0 { items = items + "," }
-        items = items + "{\"url\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 0), "")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 1), "")) + ",\"description\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 2), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 3), "")) + ",\"source\":\"crawler\"}"
+        items = items + "{\"url\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 0), "")) + ",\"title\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 1), "")) + ",\"description\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 2), "")) + ",\"image\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 3), "")) + ",\"content\":" + json_texte(unwrap_or(pg_valeur(public_sortie, i, 4), "")) + ",\"source\":\"crawler\"}"
         i = i + 1
     }
     items = items + "]"
     var total_public = 0
-    if pg_lignes(public_sortie) > 0 { total_public = unwrap_or(parse_int(unwrap_or(pg_valeur(public_sortie, 0, 5), "0")), 0) }
+    if pg_lignes(public_sortie) > 0 { total_public = unwrap_or(parse_int(unwrap_or(pg_valeur(public_sortie, 0, 6), "0")), 0) }
     // Premier passage : Brave répond tout de suite et ses URL sont mises
     // en file. Les passages suivants trouvent l'index local du crawler.
     if pg_lignes(public_sortie) == 0 {
@@ -996,7 +996,12 @@ fn api_search_text(req: Requete, params: Map<Text>) -> WebResultat {
 }
 
 fn api_search_image(req: Requete, params: Map<Text>) -> WebResultat {
-    if not has(utilisateur(req,unwrap_or(env("NOLIAE_SESSION_SECRET"),""))) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
+    // Recherche image publique (Brave) : pas de compte requis, comme la
+    // recherche texte. Débit par utilisateur si connecté, sinon par IP.
+    let id = utilisateur(req,unwrap_or(env("NOLIAE_SESSION_SECRET"),""))
+    let cle_rate = unwrap_or(id, "anon:" + unwrap_or(requete_entete(req, "X-Forwarded-For"), "anonymous"))
+    let rl = redis_rate_ok("search-img:" + cle_rate, 60, 60)
+    if has(rl) and not unwrap_or(rl, true) { return erreur_json(429, "Too Many Requests", "Limite de recherche atteinte, réessayez dans une minute.", req) }
     let keyword = parametre(params,"keyword")
     if len(keyword) < 2 { return erreur_json(422,"Unprocessable Content","keyword doit contenir au moins 2 caractères.",req) }
     let token = unwrap_or(env("NOLCORE_BRAVE_SEARCH_TOKEN"),"")
