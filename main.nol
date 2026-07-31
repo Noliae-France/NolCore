@@ -1310,6 +1310,28 @@ fn api_crawler_visite(req: Requete, params: Map<Text>) -> WebResultat {
     return erreur_json(503,"Service Unavailable","Service crawler non configuré.",req)
 }
 
+// Proxy PUBLIC (comme PageSpeed Insights, pas de compte requis) vers le
+// moteur d'analyse SEO du crawler (seo.nol). Limité par IP via Redis : ce
+// endpoint fait faire une requête sortante arbitraire au crawler pour
+// n'importe quel visiteur, donc sans limite il deviendrait un proxy SSRF/DoS
+// gratuit.
+fn api_seo_analyser(req: Requete, _params: Map<Text>) -> WebResultat {
+    let ip = ip_requete(req)
+    let rl = redis_rate_ok("seo:" + ip, 10, 300)
+    if has(rl) and not unwrap_or(rl,true) { return erreur_json(429,"Too Many Requests","Trop d'analyses SEO récentes, réessayez dans quelques minutes.",req) }
+    let corps = requete_json(req)
+    if not has(corps) { return erreur_json(400,"Bad Request","JSON invalide.",req) }
+    let url = unwrap_or(json_texte_champ(unwrap_or(corps,""),"url"),"")
+    if url == "" { return erreur_json(422,"Unprocessable Content","url obligatoire.",req) }
+    let service_url = unwrap_or(env("NOLCORE_CRAWLER_URL"), "")
+    if service_url == "" { return erreur_json(503,"Service Unavailable","Service crawler non configuré.",req) }
+    let service = http_post(service_url + "/v1/seo/analyser", "application/json", "{\"url\":" + json_texte(url) + "}")
+    if not has(service) { return erreur_json(502,"Bad Gateway","Service crawler indisponible.",req) }
+    let reponse = unwrap_or(service, ReponseHttp { statut:0, entetes:"", corps:"" })
+    if reponse.statut >= 300 { return WebResultat.WebEchec(erreur_http(reponse.statut,"SEO","Analyse impossible pour cette URL.",requete_id(req))) }
+    return WebResultat.WebOk(reponse_json(reponse.corps))
+}
+
 fn api_crawler_result(req: Requete, params: Map<Text>) -> WebResultat {
     let id = utilisateur(req, unwrap_or(env("NOLIAE_SESSION_SECRET"), ""))
     if not has(id) { return erreur_json(401,"Unauthorized","Authentification requise.",req) }
@@ -1492,6 +1514,7 @@ fn application(req: Requete) -> WebResultat {
     route_type(methodes, patrons, handlers, "GET", "/v1/search/img/:keyword", api_search_image)
     route_type(methodes, patrons, handlers, "GET", "/v1/search/ia/:keyword", api_search_ia)
     route_type(methodes, patrons, handlers, "POST", "/v1/crawler/visite/:url", api_crawler_visite)
+    route_type(methodes, patrons, handlers, "POST", "/v1/seo/analyser", api_seo_analyser)
     route_type(methodes, patrons, handlers, "GET", "/v1/crawler/result/:url", api_crawler_result)
     route_type(methodes, patrons, handlers, "GET", "/v1/discord/bot", api_discord_bot)
     route_type(methodes, patrons, handlers, "POST", "/v1/discord/webhook", api_discord_webhook)
